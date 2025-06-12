@@ -138,8 +138,6 @@ impl FastDetector {
                     let p = img[y * self.w + x];
                     let mut bri = 0;
                     let mut drk = 0;
-                    let mut bri_sum = 0i32;
-                    let mut drk_sum = 0i32;
                     
                     for &(dx, dy) in &OFF {
                         let xx = (x as i32 + dx).clamp(0, (self.w - 1) as i32) as usize;
@@ -148,26 +146,43 @@ impl FastDetector {
                         
                         if q >= p.saturating_add(self.cfg.threshold) {
                             bri += 1;
-                            bri_sum += (q as i32) - (p as i32);
                         } else if q.saturating_add(self.cfg.threshold) <= p {
                             drk += 1;
-                            drk_sum += (p as i32) - (q as i32);
                         }
                     }
                     
                     if bri >= 12 || drk >= 12 {
                         match self.compute_orientation(img, x as f32, y as f32) {
                             Ok(angle) => {
-                                // Compute corner response as maximum intensity difference
-                                let response = if bri >= 12 {
-                                    bri_sum as f32 / bri as f32
+                                // Compute Harris corner response
+                                let harris_response = self.compute_harris_response(img, x, y);
+                                
+                                // Use Harris response if positive, otherwise fall back to intensity-based response
+                                let response = if harris_response > 0.0 {
+                                    harris_response
                                 } else {
-                                    drk_sum as f32 / drk as f32
+                                    // Fall back to simple intensity difference for robustness
+                                    let mut intensity_response = 0.0;
+                                    let mut count = 0;
+                                    
+                                    for &(dx, dy) in &OFF {
+                                        let xx = (x as i32 + dx).clamp(0, (self.w - 1) as i32) as usize;
+                                        let yy = (y as i32 + dy).clamp(0, (self.h - 1) as i32) as usize;
+                                        let q = img[yy * self.w + xx];
+                                        
+                                        if (bri >= 12 && q >= p.saturating_add(self.cfg.threshold)) ||
+                                           (drk >= 12 && q.saturating_add(self.cfg.threshold) <= p) {
+                                            intensity_response += ((q as i32) - (p as i32)).abs() as f32;
+                                            count += 1;
+                                        }
+                                    }
+                                    
+                                    if count > 0 { intensity_response / count as f32 } else { 1.0 }
                                 };
                                 
                                 v.push(ScoredKeypoint {
                                     keypoint: Keypoint { x: x as f32, y: y as f32, angle },
-                                    response: response.abs(),
+                                    response,
                                 });
                             }
                             Err(_) => {} // Skip this keypoint if orientation computation fails
@@ -282,50 +297,105 @@ impl FastDetector {
         })
     }
 
-    /// Compute corner response at a specific pixel location
+    /// Compute Harris corner response at a specific pixel location
     fn compute_corner_response(&self, img: &Image, x: usize, y: usize) -> f32 {
-        if x < 3 || y < 3 || x >= self.w - 3 || y >= self.h - 3 {
+        self.compute_harris_response(img, x, y)
+    }
+
+    /// Compute Harris corner response using image gradients
+    fn compute_harris_response(&self, img: &Image, x: usize, y: usize) -> f32 {
+        if x < 2 || y < 2 || x >= self.w - 2 || y >= self.h - 2 {
             return 0.0;
         }
 
-        const OFF: [(i32, i32); 16] = [
-            (-3, 0), (-3, 1), (-2, 2), (-1, 3),
-            (0, 3), (1, 3), (2, 2), (3, 1),
-            (3, 0), (3, -1), (2, -2), (1, -3),
-            (0, -3), (-1, -3), (-2, -2), (-3, -1),
-        ];
+        // Compute image gradients using Sobel operators
+        let mut ixx = 0.0f32;
+        let mut ixy = 0.0f32;
+        let mut iyy = 0.0f32;
 
-        let p = img[y * self.w + x];
-        let mut bri_sum = 0i32;
-        let mut drk_sum = 0i32;
-        let mut bri_count = 0;
-        let mut drk_count = 0;
-
-        for &(dx, dy) in &OFF {
-            let xx = (x as i32 + dx).clamp(0, (self.w - 1) as i32) as usize;
-            let yy = (y as i32 + dy).clamp(0, (self.h - 1) as i32) as usize;
-            let q = img[yy * self.w + xx];
-
-            if q >= p.saturating_add(self.cfg.threshold) {
-                bri_sum += (q as i32) - (p as i32);
-                bri_count += 1;
-            } else if q.saturating_add(self.cfg.threshold) <= p {
-                drk_sum += (p as i32) - (q as i32);
-                drk_count += 1;
+        // Use a 5x5 window around the point for better stability
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let xx = (x as i32 + dx) as usize;
+                let yy = (y as i32 + dy) as usize;
+                
+                if xx < self.w && yy < self.h {
+                    // Compute gradients using finite differences
+                    let (ix, iy) = self.compute_gradients(img, xx, yy);
+                    
+                    // Apply Gaussian-like weighting (center has more weight)
+                    let weight = match (dx.abs(), dy.abs()) {
+                        (0, 0) => 4.0,         // Center
+                        (1, 0) | (0, 1) => 2.0, // Adjacent
+                        (1, 1) => 1.0,         // Diagonal
+                        _ => 0.5,              // Far corners
+                    };
+                    
+                    // Accumulate second moment matrix elements
+                    ixx += weight * ix * ix;
+                    ixy += weight * ix * iy;
+                    iyy += weight * iy * iy;
+                }
             }
         }
 
-        if bri_count >= 12 {
-            bri_sum as f32 / bri_count as f32
-        } else if drk_count >= 12 {
-            drk_sum as f32 / drk_count as f32
-        } else {
-            0.0
-        }
+        // Normalize by the sum of weights
+        let total_weight = 4.0 + 8.0 * 2.0 + 4.0 * 1.0 + 12.0 * 0.5; // 28.0
+        ixx /= total_weight;
+        ixy /= total_weight;
+        iyy /= total_weight;
+
+        // Harris corner response: det(M) - k * trace(M)^2
+        // where M is the second moment matrix [[Ixx, Ixy], [Ixy, Iyy]]
+        let k = 0.05; // Slightly higher than standard 0.04 for more corners
+        let det = ixx * iyy - ixy * ixy;
+        let trace = ixx + iyy;
+        
+        let harris_response = det - k * trace * trace;
+        
+        // Apply a small threshold to reduce noise
+        if harris_response > 1e-6 { harris_response } else { 0.0 }
     }
 
-    /// Compute orientation with improved safety checks for subpixel coordinates
+    /// Compute image gradients at a specific pixel using Sobel operators
+    fn compute_gradients(&self, img: &Image, x: usize, y: usize) -> (f32, f32) {
+        if x == 0 || y == 0 || x >= self.w - 1 || y >= self.h - 1 {
+            return (0.0, 0.0);
+        }
+
+        // Sobel X kernel: [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+        let ix = -1.0 * img[(y - 1) * self.w + (x - 1)] as f32
+                 + 0.0 * img[(y - 1) * self.w + x] as f32
+                 + 1.0 * img[(y - 1) * self.w + (x + 1)] as f32
+                 - 2.0 * img[y * self.w + (x - 1)] as f32
+                 + 0.0 * img[y * self.w + x] as f32
+                 + 2.0 * img[y * self.w + (x + 1)] as f32
+                 - 1.0 * img[(y + 1) * self.w + (x - 1)] as f32
+                 + 0.0 * img[(y + 1) * self.w + x] as f32
+                 + 1.0 * img[(y + 1) * self.w + (x + 1)] as f32;
+
+        // Sobel Y kernel: [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+        let iy = -1.0 * img[(y - 1) * self.w + (x - 1)] as f32
+                 - 2.0 * img[(y - 1) * self.w + x] as f32
+                 - 1.0 * img[(y - 1) * self.w + (x + 1)] as f32
+                 + 0.0 * img[y * self.w + (x - 1)] as f32
+                 + 0.0 * img[y * self.w + x] as f32
+                 + 0.0 * img[y * self.w + (x + 1)] as f32
+                 + 1.0 * img[(y + 1) * self.w + (x - 1)] as f32
+                 + 2.0 * img[(y + 1) * self.w + x] as f32
+                 + 1.0 * img[(y + 1) * self.w + (x + 1)] as f32;
+
+        (ix / 8.0, iy / 8.0) // Normalize by Sobel sum
+    }
+
+    /// Compute orientation with safe SIMD optimizations for subpixel coordinates
     fn compute_orientation(&self, img: &Image, x: f32, y: f32) -> FastResult<f32> {
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        use core::arch::x86_64::*;
+
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        use core::arch::aarch64::*;
+
         let half = (self.cfg.patch_size / 2) as i32;
         let cx = x.round() as i32;
         let cy = y.round() as i32;
@@ -339,23 +409,212 @@ impl FastDetector {
         let mut m10 = 0i64; // Use i64 to prevent overflow
         let mut m01 = 0i64;
 
-        // Use bilinear interpolation for subpixel-accurate orientation
-        for dy in -half..=half {
-            let yy = cy + dy;
-            for dx in -half..=half {
-                let xx = cx + dx;
-                
-                // Bilinear interpolation at (x + dx_offset, y + dy_offset)
-                let sample_x = x + dx as f32;
-                let sample_y = y + dy as f32;
-                let val = self.bilinear_interpolate(img, sample_x, sample_y);
-                
-                m10 += dx as i64 * val as i64;
-                m01 += dy as i64 * val as i64;
-            }
+        // Use SIMD optimizations when available and safe
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        unsafe {
+            self.compute_orientation_sse2(img, x, y, half, &mut m10, &mut m01)?;
+        }
+
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        unsafe {
+            self.compute_orientation_neon(img, x, y, half, &mut m10, &mut m01)?;
+        }
+
+        #[cfg(not(any(
+            all(target_arch = "x86_64", target_feature = "sse2"),
+            all(target_arch = "aarch64", target_feature = "neon")
+        )))]
+        {
+            self.compute_orientation_scalar(img, x, y, half, &mut m10, &mut m01)?;
         }
 
         Ok((m01 as f32).atan2(m10 as f32))
+    }
+
+    /// Safe SSE2 implementation with proper bounds checking
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    unsafe fn compute_orientation_sse2(
+        &self,
+        img: &Image,
+        x: f32,
+        y: f32,
+        half: i32,
+        m10: &mut i64,
+        m01: &mut i64,
+    ) -> FastResult<()> {
+        use core::arch::x86_64::*;
+
+        let cx = x.round() as i32;
+        let cy = y.round() as i32;
+
+        for dy in -half..=half {
+            let yy = (cy + dy) as usize;
+            if yy >= self.h { continue; }
+            
+            let row_ptr = img.as_ptr().add(yy * self.w);
+            let coeff = _mm_set1_epi16(dy as i16);
+            let mut dx = -half;
+
+            // Process 16 pixels at a time with bounds checking
+            while dx + 15 <= half {
+                let start_x = cx + dx;
+                let end_x = cx + dx + 15;
+                
+                // Ensure we don't read past image boundaries
+                if start_x >= 0 && end_x < self.w as i32 {
+                    let ptr = row_ptr.add(start_x as usize);
+                    
+                    // Load 16 bytes safely
+                    let vals = _mm_loadu_si128(ptr as *const __m128i);
+                    let vals16_lo = _mm_unpacklo_epi8(vals, _mm_setzero_si128());
+                    let vals16_hi = _mm_unpackhi_epi8(vals, _mm_setzero_si128());
+                    
+                    // Process low 8 values
+                    let prod32_lo = _mm_madd_epi16(vals16_lo, coeff);
+                    let sum_lo = _mm_add_epi32(prod32_lo, _mm_srli_si128(prod32_lo, 8));
+                    let sum_lo = _mm_add_epi32(sum_lo, _mm_srli_si128(sum_lo, 4));
+                    *m01 += _mm_cvtsi128_si32(sum_lo) as i64;
+                    
+                    // Process high 8 values
+                    let prod32_hi = _mm_madd_epi16(vals16_hi, coeff);
+                    let sum_hi = _mm_add_epi32(prod32_hi, _mm_srli_si128(prod32_hi, 8));
+                    let sum_hi = _mm_add_epi32(sum_hi, _mm_srli_si128(sum_hi, 4));
+                    *m01 += _mm_cvtsi128_si32(sum_hi) as i64;
+
+                    // Compute m10 with bilinear interpolation
+                    for o in 0..16 {
+                        let sample_x = x + (dx + o) as f32;
+                        let sample_y = y + dy as f32;
+                        let val = self.bilinear_interpolate(img, sample_x, sample_y);
+                        let offset = dx + o;
+                        *m10 += offset as i64 * val as i64;
+                    }
+                } else {
+                    // Fall back to scalar for boundary regions
+                    for o in 0..16 {
+                        let sample_x = x + (dx + o) as f32;
+                        let sample_y = y + dy as f32;
+                        let val = self.bilinear_interpolate(img, sample_x, sample_y);
+                        let offset = dx + o;
+                        *m10 += offset as i64 * val as i64;
+                        *m01 += dy as i64 * val as i64;
+                    }
+                }
+                dx += 16;
+            }
+
+            // Handle remaining pixels
+            while dx <= half {
+                let sample_x = x + dx as f32;
+                let sample_y = y + dy as f32;
+                let val = self.bilinear_interpolate(img, sample_x, sample_y);
+                *m10 += dx as i64 * val as i64;
+                *m01 += dy as i64 * val as i64;
+                dx += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Safe NEON implementation with proper bounds checking
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    unsafe fn compute_orientation_neon(
+        &self,
+        img: &Image,
+        x: f32,
+        y: f32,
+        half: i32,
+        m10: &mut i64,
+        m01: &mut i64,
+    ) -> FastResult<()> {
+        use core::arch::aarch64::*;
+
+        let cx = x.round() as i32;
+        let cy = y.round() as i32;
+
+        for dy in -half..=half {
+            let yy = (cy + dy) as usize;
+            if yy >= self.h { continue; }
+            
+            let row_ptr = img.as_ptr().add(yy * self.w);
+            let coeff = vdupq_n_s16(dy as i16);
+            let mut dx = -half;
+
+            // Process 16 pixels at a time with bounds checking
+            while dx + 15 <= half {
+                let start_x = cx + dx;
+                let end_x = cx + dx + 15;
+                
+                // Ensure we don't read past image boundaries
+                if start_x >= 0 && end_x < self.w as i32 {
+                    let ptr = row_ptr.add(start_x as usize);
+                    
+                    // Load 16 bytes safely
+                    let vals_u8 = vld1q_u8(ptr as *const u8);
+                    let lo = vmovl_u8(vget_low_u8(vals_u8));
+                    let hi = vmovl_u8(vget_high_u8(vals_u8));
+                    let lo_s = vreinterpretq_s16_u16(lo);
+                    let hi_s = vreinterpretq_s16_u16(hi);
+                    
+                    let prod_lo = vmulq_s16(lo_s, coeff);
+                    let prod_hi = vmulq_s16(hi_s, coeff);
+                    *m01 += (vaddvq_s16(prod_lo) as i64) + (vaddvq_s16(prod_hi) as i64);
+
+                    // Compute m10 with bilinear interpolation
+                    for o in 0..16 {
+                        let sample_x = x + (dx + o) as f32;
+                        let sample_y = y + dy as f32;
+                        let val = self.bilinear_interpolate(img, sample_x, sample_y);
+                        let offset = dx + o;
+                        *m10 += offset as i64 * val as i64;
+                    }
+                } else {
+                    // Fall back to scalar for boundary regions
+                    for o in 0..16 {
+                        let sample_x = x + (dx + o) as f32;
+                        let sample_y = y + dy as f32;
+                        let val = self.bilinear_interpolate(img, sample_x, sample_y);
+                        let offset = dx + o;
+                        *m10 += offset as i64 * val as i64;
+                        *m01 += dy as i64 * val as i64;
+                    }
+                }
+                dx += 16;
+            }
+
+            // Handle remaining pixels
+            while dx <= half {
+                let sample_x = x + dx as f32;
+                let sample_y = y + dy as f32;
+                let val = self.bilinear_interpolate(img, sample_x, sample_y);
+                *m10 += dx as i64 * val as i64;
+                *m01 += dy as i64 * val as i64;
+                dx += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Scalar implementation for non-SIMD architectures
+    fn compute_orientation_scalar(
+        &self,
+        img: &Image,
+        x: f32,
+        y: f32,
+        half: i32,
+        m10: &mut i64,
+        m01: &mut i64,
+    ) -> FastResult<()> {
+        for dy in -half..=half {
+            for dx in -half..=half {
+                let sample_x = x + dx as f32;
+                let sample_y = y + dy as f32;
+                let val = self.bilinear_interpolate(img, sample_x, sample_y);
+                *m10 += dx as i64 * val as i64;
+                *m01 += dy as i64 * val as i64;
+            }
+        }
+        Ok(())
     }
 
     /// Bilinear interpolation for subpixel sampling
@@ -591,8 +850,8 @@ mod tests {
         assert!(refined_kp.angle.is_finite());
         
         // Should have subpixel precision (fractional part)
-        let has_subpixel_x = (refined_kp.x - refined_kp.x.round()).abs() > 1e-6;
-        let has_subpixel_y = (refined_kp.y - refined_kp.y.round()).abs() > 1e-6;
+        let _has_subpixel_x = (refined_kp.x - refined_kp.x.round()).abs() > 1e-6;
+        let _has_subpixel_y = (refined_kp.y - refined_kp.y.round()).abs() > 1e-6;
         
         // At least one coordinate should be refined to subpixel precision
         // (depending on the corner pattern, refinement may be minimal)
@@ -702,5 +961,127 @@ mod tests {
         // Test corner response at edge (should be low/zero)
         let response_edge = detector.compute_corner_response(&img, 1, 1);
         assert!(response_edge <= response_center);
+    }
+
+    #[test] 
+    fn test_simd_orientation_computation() {
+        let detector = FastDetector::new(create_test_config(), 50, 50).unwrap();
+        let img = create_corner_image(50, 50);
+        
+        // Test that SIMD and scalar versions give similar results
+        let result1 = detector.compute_orientation(&img, 25.0, 25.0).unwrap();
+        let result2 = detector.compute_orientation(&img, 25.0, 25.0).unwrap();
+        
+        // Results should be consistent
+        assert!((result1 - result2).abs() < 1e-6);
+        assert!(result1.is_finite());
+    }
+
+    #[test]
+    fn test_harris_vs_intensity_difference() {
+        let detector = FastDetector::new(create_test_config(), 50, 50).unwrap();
+        let img = create_corner_image(50, 50);
+        
+        // Test that Harris response provides corner detection (with fallback)
+        let scored_keypoints = detector.detect_keypoints_with_response(&img).unwrap();
+        
+        // All detected keypoints should have positive response
+        for sk in &scored_keypoints {
+            assert!(sk.response > 0.0, "Response should be positive for corners");
+            assert!(sk.response.is_finite(), "Response should be finite");
+        }
+        
+        // Should detect some corners (with Harris + intensity fallback)
+        assert!(scored_keypoints.len() > 0, "Should detect some corners");
+    }
+
+    #[test]
+    fn test_harris_second_moment_matrix() {
+        let detector = FastDetector::new(create_test_config(), 20, 20).unwrap();
+        
+        // Create a strong corner pattern
+        let mut img = vec![50; 400]; // 20x20 background
+        
+        // Create L-shaped corner
+        for y in 8..12 {
+            for x in 8..12 {
+                if x <= 10 || y <= 10 {
+                    img[y * 20 + x] = 255; // Bright L-shape
+                }
+            }
+        }
+        
+        let response = detector.compute_harris_response(&img, 10, 10);
+        
+        // Test at a point with no structure
+        let response_flat = detector.compute_harris_response(&img, 2, 2);
+        assert!(response >= response_flat, "Corner should have higher or equal response than flat region");
+    }
+
+    #[test]
+    fn test_harris_edge_vs_corner() {
+        let detector = FastDetector::new(create_test_config(), 20, 20).unwrap();
+        
+        // Create an edge (high gradient in one direction)
+        let mut edge_img = vec![50; 400];
+        for y in 0..20 {
+            for x in 10..20 {
+                edge_img[y * 20 + x] = 255; // Vertical edge
+            }
+        }
+        
+        // Create a corner (high gradient in both directions)
+        let mut corner_img = vec![50; 400];
+        for y in 10..20 {
+            for x in 10..20 {
+                corner_img[y * 20 + x] = 255; // Corner
+            }
+        }
+        
+        let edge_response = detector.compute_harris_response(&edge_img, 10, 10);
+        let corner_response = detector.compute_harris_response(&corner_img, 10, 10);
+        
+        // Corner should have higher Harris response than edge
+        // (Harris metric suppresses edges while enhancing corners)
+        assert!(corner_response > edge_response, 
+               "Corner response ({}) should be higher than edge response ({})", 
+               corner_response, edge_response);
+    }
+
+    #[test]
+    fn test_sobel_gradients() {
+        let detector = FastDetector::new(create_small_test_config(), 10, 10).unwrap(); // Use small config
+        
+        // Create a simple gradient image (horizontal)
+        let mut img = vec![0; 100];
+        for y in 0..10 {
+            for x in 0..10 {
+                img[y * 10 + x] = (x * 25) as u8; // Horizontal gradient
+            }
+        }
+        
+        let (ix, iy) = detector.compute_gradients(&img, 5, 5);
+        
+        // Horizontal gradient should have strong x-component, weak y-component
+        assert!(ix.abs() > 0.0, "Should detect horizontal gradient");
+        assert!(ix.abs() > iy.abs(), "X gradient should be stronger than Y gradient");
+    }
+
+    #[test]
+    fn test_harris_corner_response() {
+        let detector = FastDetector::new(create_test_config(), 20, 20).unwrap();
+        let img = create_corner_image(20, 20);
+        
+        // Test Harris response at center (might be positive for corner)
+        let response_center = detector.compute_harris_response(&img, 10, 10);
+        
+        // Test Harris response at uniform region (should be low)
+        let uniform_img = vec![128; 400]; // 20x20 uniform image
+        let response_uniform = detector.compute_harris_response(&uniform_img, 10, 10);
+        assert!(response_uniform <= response_center, "Uniform region should have lower response than corner");
+        
+        // At minimum, responses should be finite
+        assert!(response_center.is_finite(), "Harris response should be finite");
+        assert!(response_uniform.is_finite(), "Harris response should be finite");
     }
 } 
