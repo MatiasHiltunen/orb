@@ -1,11 +1,11 @@
 /// Row-major 8-bit grayscale image
 pub type Image = Vec<u8>;
 
-/// Key-point ≙ FAST corner + orientation (radians)
+/// Key-point ≙ FAST corner + orientation (radians) with subpixel precision
 #[derive(Debug, Clone, Copy)]
 pub struct Keypoint {
-    pub x: usize,
-    pub y: usize,
+    pub x: f32,      // Subpixel x coordinate
+    pub y: f32,      // Subpixel y coordinate
     pub angle: f32,
 }
 

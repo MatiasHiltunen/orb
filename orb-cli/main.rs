@@ -49,11 +49,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Convert image to RGBA for drawing
     let mut output: RgbaImage = image::DynamicImage::ImageLuma8(img).into_rgba8();
 
-    // Draw red circles at each keypoint
+    // Draw red circles at each keypoint (round subpixel coordinates)
     for kp in &kps {
         draw_hollow_circle_mut(
             &mut output,
-            (kp.x as i32, kp.y as i32),
+            (kp.x.round() as i32, kp.y.round() as i32),
             3,
             Rgba([255, 0, 0, 255]),
         );
@@ -65,5 +65,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to save output image: {}", e))?;
     
     println!("Saved result image as lenna_keypoints.png");
+
+    // Print some subpixel precision examples
+    println!("\nSubpixel precision examples:");
+    for (i, kp) in kps.iter().take(5).enumerate() {
+        println!("  Keypoint {}: ({:.3}, {:.3}), angle: {:.3}°", 
+                i+1, kp.x, kp.y, kp.angle.to_degrees());
+    }
+
     Ok(())
 } 
