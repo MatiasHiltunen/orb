@@ -1,0 +1,14 @@
+[package]
+name = "orb-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core types and configuration for ORB feature detection"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "orb_core"
+path = "lib.rs"
+
+[dependencies]
+rayon = { workspace = true }
+num_cpus = { workspace = true } 

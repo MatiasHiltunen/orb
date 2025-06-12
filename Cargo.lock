@@ -687,12 +687,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
-name = "orb"
+name = "orb-brief"
+version = "0.1.0"
+dependencies = [
+ "orb-core",
+ "rayon",
+]
+
+[[package]]
+name = "orb-cli"
 version = "0.1.0"
 dependencies = [
  "image",
  "imageproc",
+ "orb-brief",
+ "orb-core",
+ "orb-fast",
+]
+
+[[package]]
+name = "orb-core"
+version = "0.1.0"
+dependencies = [
  "num_cpus",
+ "rayon",
+]
+
+[[package]]
+name = "orb-fast"
+version = "0.1.0"
+dependencies = [
+ "orb-core",
  "rayon",
 ]
 

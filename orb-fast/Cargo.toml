@@ -1,0 +1,23 @@
+[package]
+name = "orb-fast"
+version = "0.1.0"
+edition = "2021"
+description = "FAST corner detection for ORB feature detection"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "orb_fast"
+path = "lib.rs"
+
+[dependencies]
+orb-core = { path = "../orb-core" }
+rayon = { workspace = true }
+
+[build]
+target = "aarch64-linux-android"
+
+[target.aarch64-linux-android]
+rustflags = [
+  "-Ctarget-cpu=native",
+  "-Ctarget-feature=+neon"
+] 

@@ -1,0 +1,21 @@
+[package]
+name = "orb-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool and high-level library for ORB feature detection"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "orb"
+path = "main.rs"
+
+[lib]
+name = "orb_cli"
+path = "lib.rs"
+
+[dependencies]
+orb-core = { path = "../orb-core" }
+orb-fast = { path = "../orb-fast" }
+orb-brief = { path = "../orb-brief" }
+image = { workspace = true }
+imageproc = { workspace = true } 

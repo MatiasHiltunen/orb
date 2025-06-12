@@ -1,0 +1,14 @@
+[package]
+name = "orb-brief"
+version = "0.1.0"
+edition = "2021"
+description = "BRIEF descriptor generation for ORB feature detection"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "orb_brief"
+path = "lib.rs"
+
+[dependencies]
+orb-core = { path = "../orb-core" }
+rayon = { workspace = true } 

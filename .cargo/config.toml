@@ -1,8 +1,0 @@
-[build]
-target = "aarch64-linux-android"
-
-[target.aarch64-linux-android]
-rustflags = [
-  "-C", "target-feature=+neon",
-  # "-C", "target-cpu=native"
-]
