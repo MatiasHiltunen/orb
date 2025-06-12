@@ -703,6 +703,7 @@ dependencies = [
  "orb-brief",
  "orb-core",
  "orb-fast",
+ "rayon",
 ]
 
 [[package]]

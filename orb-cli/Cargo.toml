@@ -18,4 +18,5 @@ orb-core = { path = "../orb-core" }
 orb-fast = { path = "../orb-fast" }
 orb-brief = { path = "../orb-brief" }
 image = { workspace = true }
-imageproc = { workspace = true } 
+imageproc = { workspace = true }
+rayon = { workspace = true } 

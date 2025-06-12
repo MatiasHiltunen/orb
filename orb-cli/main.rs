@@ -3,25 +3,48 @@ use image::{ImageReader, Rgba, RgbaImage};
 use imageproc::drawing::draw_hollow_circle_mut;
 use std::time::Instant;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load grayscale image
     let img = ImageReader::open("lenna.png")
-        .expect("Image not found")
+        .map_err(|e| format!("Failed to open image: {}", e))?
         .decode()
-        .expect("Decode failed")
+        .map_err(|e| format!("Failed to decode image: {}", e))?
         .to_luma8();
 
     let (w, h) = img.dimensions();
-    let orb = OrbMax::new(Config::default(), w as usize, h as usize);
+    println!("Processing image: {}x{}", w, h);
+
+    // Create ORB detector with error handling
+    let orb = match OrbMax::new(Config::default(), w as usize, h as usize) {
+        Ok(orb) => orb,
+        Err(e) => {
+            eprintln!("Failed to create ORB detector: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    println!("ORB detector created successfully");
+    println!("Configuration: {:?}", orb.config());
 
     // Time the full pipeline
     let t0 = Instant::now();
-    let (kps, desc) = orb.detect_and_describe(img.as_raw());
+    let (kps, desc) = match orb.detect_and_describe(img.as_raw()) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("Failed to detect features: {}", e);
+            return Err(e.into());
+        }
+    };
     let elapsed = t0.elapsed();
 
     println!("Time taken: {:.2?}", elapsed);
     println!("Detected {} keypoints", kps.len());
     println!("Generated {} descriptors", desc.len());
+
+    if kps.is_empty() {
+        println!("Warning: No keypoints detected. Consider adjusting threshold or checking image quality.");
+        return Ok(());
+    }
 
     // Convert image to RGBA for drawing
     let mut output: RgbaImage = image::DynamicImage::ImageLuma8(img).into_rgba8();
@@ -39,6 +62,8 @@ fn main() {
     // Save result
     output
         .save("lenna_keypoints.png")
-        .expect("Failed to save output image");
+        .map_err(|e| format!("Failed to save output image: {}", e))?;
+    
     println!("Saved result image as lenna_keypoints.png");
+    Ok(())
 } 
