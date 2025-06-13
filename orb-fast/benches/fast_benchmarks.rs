@@ -233,14 +233,14 @@ fn bench_multiscale(c: &mut Criterion) {
     // Benchmark image pyramid construction
     group.bench_function("build_pyramid", |b| {
         b.iter(|| {
-            black_box(detector.build_image_pyramid(black_box(&img)).unwrap())
+            black_box(orb_fast::pyramid::ImagePyramid::build_image_pyramid(black_box(&img), width, height, detector.get_scale_levels()).unwrap())
         })
     });
     
     // Benchmark single scale level detection
     let scale_levels = detector.get_scale_levels();
     if scale_levels.len() > 1 {
-        let pyramid = detector.build_image_pyramid(&img).unwrap();
+        let pyramid = orb_fast::pyramid::ImagePyramid::build_image_pyramid(&img, width, height, scale_levels).unwrap();
         group.bench_function("single_scale_detection", |b| {
             b.iter(|| {
                 black_box(detector.detect_keypoints_at_scale(black_box(&pyramid[1]), black_box(&scale_levels[1])).unwrap())

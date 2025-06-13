@@ -12,6 +12,7 @@ path = "lib.rs"
 [dependencies]
 orb-core = { path = "../orb-core" }
 rayon = { workspace = true }
+num_cpus = "1.16"
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }

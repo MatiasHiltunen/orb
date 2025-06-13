@@ -916,6 +916,7 @@ name = "orb-fast"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "num_cpus",
  "orb-core",
  "proptest",
  "rayon",
