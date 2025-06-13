@@ -1,6 +1,9 @@
 use orb_core::{Image, Keypoint, OrbConfig};
 use rayon::prelude::*;
 
+#[cfg(feature = "serde")]
+use serde::{Serialize, Deserialize};
+
 #[derive(Debug, Clone)]
 pub enum FastError {
     InvalidImageSize { width: usize, height: usize },
@@ -1755,6 +1758,223 @@ impl FastDetector {
     }
 }
 
+/// Comprehensive detector configuration with serialization support
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone)]
+pub struct DetectorConfig {
+    /// Core ORB configuration
+    pub core: OrbConfig,
+    /// Image dimensions
+    pub width: usize,
+    pub height: usize,
+    /// Feature flags
+    pub enable_simd: bool,
+    pub enable_optimized_layout: bool,
+    pub enable_harris_corners: bool,
+    pub enable_adaptive_thresholding: bool,
+    pub enable_clahe_preprocessing: bool,
+    /// Performance tuning
+    pub nms_distance: f32,
+    pub subpixel_refinement: bool,
+    /// Metadata
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub name: Option<String>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub description: Option<String>,
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub version: Option<String>,
+}
+
+impl DetectorConfig {
+    /// Create a new detector configuration
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            core: OrbConfig::default(),
+            width,
+            height,
+            enable_simd: true,
+            enable_optimized_layout: true,
+            enable_harris_corners: false,
+            enable_adaptive_thresholding: false,
+            enable_clahe_preprocessing: false,
+            nms_distance: 5.0,
+            subpixel_refinement: true,
+            name: None,
+            description: None,
+            version: Some("1.0.0".to_string()),
+        }
+    }
+
+    /// Create fast preset configuration
+    pub fn fast_preset(width: usize, height: usize) -> Self {
+        Self {
+            core: OrbConfig { threshold: 25, patch_size: 15, n_threads: 1 },
+            width,
+            height,
+            enable_simd: true,
+            enable_optimized_layout: true,
+            enable_harris_corners: false,
+            enable_adaptive_thresholding: false,
+            enable_clahe_preprocessing: false,
+            nms_distance: 3.0,
+            subpixel_refinement: false,
+            name: Some("Fast Preset".to_string()),
+            description: Some("Minimal features for maximum speed".to_string()),
+            version: Some("1.0.0".to_string()),
+        }
+    }
+
+    /// Create quality preset configuration
+    pub fn quality_preset(width: usize, height: usize) -> Self {
+        Self {
+            core: OrbConfig { threshold: 20, patch_size: 15, n_threads: 1 },
+            width,
+            height,
+            enable_simd: true,
+            enable_optimized_layout: true,
+            enable_harris_corners: true,
+            enable_adaptive_thresholding: true,
+            enable_clahe_preprocessing: true,
+            nms_distance: 5.0,
+            subpixel_refinement: true,
+            name: Some("Quality Preset".to_string()),
+            description: Some("All quality features enabled".to_string()),
+            version: Some("1.0.0".to_string()),
+        }
+    }
+
+    /// Create illumination robust preset configuration
+    pub fn illumination_robust_preset(width: usize, height: usize) -> Self {
+        Self {
+            core: OrbConfig { threshold: 15, patch_size: 15, n_threads: 1 },
+            width,
+            height,
+            enable_simd: true,
+            enable_optimized_layout: true,
+            enable_harris_corners: false,
+            enable_adaptive_thresholding: true,
+            enable_clahe_preprocessing: true,
+            nms_distance: 4.0,
+            subpixel_refinement: true,
+            name: Some("Illumination Robust Preset".to_string()),
+            description: Some("Optimized for varying lighting conditions".to_string()),
+            version: Some("1.0.0".to_string()),
+        }
+    }
+
+    /// Set metadata
+    pub fn with_metadata(mut self, name: &str, description: &str) -> Self {
+        self.name = Some(name.to_string());
+        self.description = Some(description.to_string());
+        self
+    }
+
+    /// Convert to DetectorBuilder
+    pub fn to_builder(self) -> DetectorBuilder {
+        DetectorBuilder {
+            config: self.core,
+            width: self.width,
+            height: self.height,
+            enable_simd: self.enable_simd,
+            enable_optimized_layout: self.enable_optimized_layout,
+            enable_harris_corners: self.enable_harris_corners,
+            enable_adaptive_thresholding: self.enable_adaptive_thresholding,
+            enable_clahe_preprocessing: self.enable_clahe_preprocessing,
+            nms_distance: self.nms_distance,
+            subpixel_refinement: self.subpixel_refinement,
+        }
+    }
+
+    /// Get configuration summary
+    pub fn summary(&self) -> String {
+        let mut features = Vec::new();
+        
+        if self.enable_simd { features.push("SIMD"); }
+        if self.enable_optimized_layout { features.push("OptLayout"); }
+        if self.enable_harris_corners { features.push("Harris"); }
+        if self.enable_adaptive_thresholding { features.push("AdaptThresh"); }
+        if self.enable_clahe_preprocessing { features.push("CLAHE"); }
+        if self.subpixel_refinement { features.push("Subpixel"); }
+        
+        let name = self.name.as_deref().unwrap_or("Custom");
+        format!(
+            "{} {}x{} [thresh:{}, patch:{}, nms:{:.1}, features:{}]",
+            name, self.width, self.height,
+            self.core.threshold, self.core.patch_size, self.nms_distance,
+            if features.is_empty() { "None".to_string() } else { features.join("+") }
+        )
+    }
+
+    /// Validate configuration
+    pub fn validate(&self) -> FastResult<()> {
+        // Reuse FastDetector validation
+        let _ = FastDetector::new(self.core.clone(), self.width, self.height)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "serde")]
+    /// Save configuration to JSON file
+    pub fn save_json<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "serde")]
+    /// Load configuration from JSON file
+    pub fn load_json<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let json = std::fs::read_to_string(path)?;
+        let config: DetectorConfig = serde_json::from_str(&json)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    #[cfg(feature = "serde")]
+    /// Save configuration to TOML file
+    pub fn save_toml<P: AsRef<std::path::Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let toml_str = toml::to_string_pretty(self)?;
+        std::fs::write(path, toml_str)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "serde")]
+    /// Load configuration from TOML file
+    pub fn load_toml<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let toml_str = std::fs::read_to_string(path)?;
+        let config: DetectorConfig = toml::from_str(&toml_str)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    #[cfg(feature = "serde")]
+    /// Serialize to JSON string
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    #[cfg(feature = "serde")]
+    /// Deserialize from JSON string
+    pub fn from_json(json: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let config: DetectorConfig = serde_json::from_str(json)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    #[cfg(feature = "serde")]
+    /// Serialize to TOML string
+    pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
+        toml::to_string_pretty(self)
+    }
+
+    #[cfg(feature = "serde")]
+    /// Deserialize from TOML string
+    pub fn from_toml(toml_str: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let config: DetectorConfig = toml::from_str(toml_str)?;
+        config.validate()?;
+        Ok(config)
+    }
+}
+
 /// Builder pattern for configuring FastDetector with fluent API
 #[derive(Debug, Clone)]
 pub struct DetectorBuilder {
@@ -1917,6 +2137,30 @@ impl DetectorBuilder {
             self.nms_distance,
             if features.is_empty() { "None".to_string() } else { features.join("+") }
         )
+    }
+
+    /// Create builder from DetectorConfig
+    pub fn from_config(config: DetectorConfig) -> Self {
+        config.to_builder()
+    }
+
+    /// Convert to DetectorConfig
+    pub fn to_config(self) -> DetectorConfig {
+        DetectorConfig {
+            core: self.config,
+            width: self.width,
+            height: self.height,
+            enable_simd: self.enable_simd,
+            enable_optimized_layout: self.enable_optimized_layout,
+            enable_harris_corners: self.enable_harris_corners,
+            enable_adaptive_thresholding: self.enable_adaptive_thresholding,
+            enable_clahe_preprocessing: self.enable_clahe_preprocessing,
+            nms_distance: self.nms_distance,
+            subpixel_refinement: self.subpixel_refinement,
+            name: None,
+            description: None,
+            version: Some("1.0.0".to_string()),
+        }
     }
 }
 
@@ -2964,5 +3208,137 @@ mod tests {
         let invalid_dims = DetectorBuilder::new(5, 5)
             .build();
         assert!(invalid_dims.is_err(), "Too small dimensions should fail");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_detector_config_serialization() {
+        let config = DetectorConfig::fast_preset(512, 512);
+        
+        // Test JSON serialization
+        let json = config.to_json().unwrap();
+        assert!(json.contains("\"name\": \"Fast Preset\""));
+        assert!(json.contains("\"width\": 512"));
+        assert!(json.contains("\"height\": 512"));
+        assert!(json.contains("\"threshold\": 25"));
+        
+        let deserialized = DetectorConfig::from_json(&json).unwrap();
+        assert_eq!(deserialized.width, config.width);
+        assert_eq!(deserialized.height, config.height);
+        assert_eq!(deserialized.core.threshold, config.core.threshold);
+        assert_eq!(deserialized.name, config.name);
+        
+        // Test TOML serialization
+        let toml_str = config.to_toml().unwrap();
+        assert!(toml_str.contains("name = \"Fast Preset\""));
+        assert!(toml_str.contains("width = 512"));
+        
+        let deserialized_toml = DetectorConfig::from_toml(&toml_str).unwrap();
+        assert_eq!(deserialized_toml.width, config.width);
+        assert_eq!(deserialized_toml.nms_distance, config.nms_distance);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_detector_config_presets() {
+        // Test all preset configurations
+        let fast = DetectorConfig::fast_preset(256, 256);
+        assert_eq!(fast.core.threshold, 25);
+        assert_eq!(fast.nms_distance, 3.0);
+        assert!(!fast.enable_harris_corners);
+        assert!(!fast.enable_clahe_preprocessing);
+        assert_eq!(fast.name, Some("Fast Preset".to_string()));
+        
+        let quality = DetectorConfig::quality_preset(256, 256);
+        assert_eq!(quality.core.threshold, 20);
+        assert_eq!(quality.nms_distance, 5.0);
+        assert!(quality.enable_harris_corners);
+        assert!(quality.enable_clahe_preprocessing);
+        assert_eq!(quality.name, Some("Quality Preset".to_string()));
+        
+        let robust = DetectorConfig::illumination_robust_preset(256, 256);
+        assert_eq!(robust.core.threshold, 15);
+        assert_eq!(robust.nms_distance, 4.0);
+        assert!(!robust.enable_harris_corners);
+        assert!(robust.enable_clahe_preprocessing);
+        assert!(robust.enable_adaptive_thresholding);
+        assert_eq!(robust.name, Some("Illumination Robust Preset".to_string()));
+        
+        // Test serialization of presets
+        let fast_json = fast.to_json().unwrap();
+        let fast_toml = fast.to_toml().unwrap();
+        
+        let fast_from_json = DetectorConfig::from_json(&fast_json).unwrap();
+        let fast_from_toml = DetectorConfig::from_toml(&fast_toml).unwrap();
+        
+        assert_eq!(fast_from_json.core.threshold, fast.core.threshold);
+        assert_eq!(fast_from_toml.core.threshold, fast.core.threshold);
+    }
+
+    #[test]
+    fn test_detector_config_builder_integration() {
+        let config = DetectorConfig::new(200, 200);
+        let builder = config.to_builder();
+        let back_to_config = builder.to_config();
+        
+        assert_eq!(back_to_config.width, 200);
+        assert_eq!(back_to_config.height, 200);
+        assert_eq!(back_to_config.core.threshold, 20); // default
+        
+        // Test building from config
+        let builder_from_config = DetectorBuilder::from_config(DetectorConfig::fast_preset(100, 100));
+        let configured = builder_from_config.build().unwrap();
+        
+        assert_eq!(configured.dimensions(), (100, 100));
+    }
+
+    #[test]
+    fn test_detector_config_validation() {
+        // Valid configuration
+        let valid_config = DetectorConfig::new(100, 100);
+        assert!(valid_config.validate().is_ok());
+        
+        // Invalid configuration (threshold 0)
+        let mut invalid_config = DetectorConfig::new(100, 100);
+        invalid_config.core.threshold = 0;
+        assert!(invalid_config.validate().is_err());
+        
+        // Invalid configuration (even patch size)
+        let mut invalid_patch = DetectorConfig::new(100, 100);
+        invalid_patch.core.patch_size = 16;
+        assert!(invalid_patch.validate().is_err());
+        
+        // Invalid configuration (too small dimensions)
+        let invalid_dims = DetectorConfig::new(5, 5);
+        assert!(invalid_dims.validate().is_err());
+    }
+
+    #[test]
+    fn test_detector_config_summary() {
+        let config = DetectorConfig::fast_preset(512, 512);
+        let summary = config.summary();
+        
+        assert!(summary.contains("Fast Preset"));
+        assert!(summary.contains("512x512"));
+        assert!(summary.contains("thresh:25"));
+        assert!(summary.contains("nms:3.0"));
+        assert!(summary.contains("SIMD"));
+        assert!(summary.contains("OptLayout"));
+        assert!(!summary.contains("Harris"));
+        assert!(!summary.contains("CLAHE"));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_debug_serialization() {
+        let config = DetectorConfig::fast_preset(256, 256);
+        println!("Config name: {:?}", config.name);
+        println!("Config summary: {}", config.summary());
+        
+        let json = config.to_json().unwrap();
+        println!("JSON output: {}", json);
+        
+        assert!(config.name.is_some());
+        assert_eq!(config.name, Some("Fast Preset".to_string()));
     }
 } 

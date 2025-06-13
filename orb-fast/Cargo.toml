@@ -12,6 +12,9 @@ path = "lib.rs"
 [dependencies]
 orb-core = { path = "../orb-core" }
 rayon = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -56,4 +59,7 @@ adaptive-thresholding = []
 clahe-preprocessing = []
 
 # All quality features combined
-quality = ["harris-corners", "adaptive-thresholding", "clahe-preprocessing"] 
+quality = ["harris-corners", "adaptive-thresholding", "clahe-preprocessing"]
+
+# Serialization support
+serde = ["dep:serde", "dep:serde_json", "dep:toml", "orb-core/serde"] 

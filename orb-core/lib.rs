@@ -2,6 +2,7 @@
 pub type Image = Vec<u8>;
 
 /// Key-point ≙ FAST corner + orientation (radians) with subpixel precision
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy)]
 pub struct Keypoint {
     pub x: f32,      // Subpixel x coordinate
@@ -12,6 +13,8 @@ pub struct Keypoint {
 /// 256-bit binary descriptor = 32 bytes
 pub type Descriptor = [u8; 32];
 
+/// Core ORB configuration with serialization support
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone)]
 pub struct OrbConfig {
     pub threshold: u8,

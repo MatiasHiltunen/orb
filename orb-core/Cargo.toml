@@ -11,4 +11,9 @@ path = "lib.rs"
 
 [dependencies]
 rayon = { workspace = true }
-num_cpus = { workspace = true } 
+num_cpus = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"] 

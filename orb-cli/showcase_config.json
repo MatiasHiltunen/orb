@@ -1,0 +1,19 @@
+{
+  "core": {
+    "threshold": 20,
+    "patch_size": 15,
+    "n_threads": 1
+  },
+  "width": 567,
+  "height": 567,
+  "enable_simd": true,
+  "enable_optimized_layout": true,
+  "enable_harris_corners": true,
+  "enable_adaptive_thresholding": true,
+  "enable_clahe_preprocessing": true,
+  "nms_distance": 5.0,
+  "subpixel_refinement": true,
+  "name": "Production Quality",
+  "description": "Optimized for feature-rich detection",
+  "version": "1.0.0"
+}
