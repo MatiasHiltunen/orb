@@ -13,6 +13,14 @@ path = "lib.rs"
 orb-core = { path = "../orb-core" }
 rayon = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "fast_benchmarks"
+harness = false
+
 [build]
 target = "aarch64-linux-android"
 
@@ -20,4 +28,32 @@ target = "aarch64-linux-android"
 rustflags = [
   "-Ctarget-cpu=native",
   "-Ctarget-feature=+neon"
-] 
+]
+
+[features]
+default = ["simd", "optimized-memory-layout"]
+
+# SIMD optimizations
+simd = []
+avx2 = ["simd"]
+avx512 = ["simd", "avx2"]
+
+# Memory layout optimizations
+optimized-memory-layout = []
+chunked-processing = ["optimized-memory-layout"]
+
+# Experimental features (disabled by default)
+integral-images = []
+rolling-window-stats = []
+
+# Debug features
+debug-performance = []
+debug-visualization = []
+
+# Quality improvements
+harris-corners = []
+adaptive-thresholding = []
+clahe-preprocessing = []
+
+# All quality features combined
+quality = ["harris-corners", "adaptive-thresholding", "clahe-preprocessing"] 

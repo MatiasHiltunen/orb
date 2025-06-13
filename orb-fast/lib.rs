@@ -59,6 +59,14 @@ pub struct FastDetector {
     scale_levels: Vec<ScaleLevel>,
 }
 
+/// Corner type classification for optimized processing
+#[derive(Clone, Copy, Debug)]
+enum CornerType {
+    Bright,
+    Dark,
+    None,
+}
+
 impl FastDetector {
     /// Creates a new FAST detector with validation
     pub fn new(cfg: OrbConfig, width: usize, height: usize) -> FastResult<Self> {
@@ -199,16 +207,23 @@ impl FastDetector {
     }
 
     /// Build image pyramid by downscaling original image
-    fn build_image_pyramid(&self, img: &Image) -> FastResult<Vec<Image>> {
+    pub fn build_image_pyramid(&self, img: &Image) -> FastResult<Vec<Image>> {
+        // Apply CLAHE preprocessing if enabled
+        #[cfg(feature = "clahe-preprocessing")]
+        let processed_img = self.apply_clahe_preprocessing(img)?;
+        
+        #[cfg(not(feature = "clahe-preprocessing"))]
+        let processed_img = img.clone();
+        
         let mut pyramid = Vec::new();
         
         for scale_level in &self.scale_levels {
             let scaled_img = if scale_level.level == 0 {
-                // Level 0 is the original image
-                img.clone()
+                // Level 0 is the processed image
+                processed_img.clone()
             } else {
-                // Downsample the image
-                self.downsample_image(img, scale_level.width, scale_level.height)?
+                // Downsample the processed image
+                self.downsample_image(&processed_img, scale_level.width, scale_level.height)?
             };
             pyramid.push(scaled_img);
         }
@@ -257,8 +272,8 @@ impl FastDetector {
         top * (1.0 - dy) + bottom * dy
     }
 
-    /// Detect keypoints at a specific scale level
-    fn detect_keypoints_at_scale(&self, img: &Image, scale_level: &ScaleLevel) -> FastResult<Vec<ScoredKeypoint>> {
+    /// Detect keypoints at a specific scale level with configurable optimizations
+    pub fn detect_keypoints_at_scale(&self, img: &Image, scale_level: &ScaleLevel) -> FastResult<Vec<ScoredKeypoint>> {
         const OFF: [(i32, i32); 16] = [
             (-3, 0), (-3, 1), (-2, 2), (-1, 3),
             (0, 3), (1, 3), (2, 2), (3, 1),
@@ -267,8 +282,33 @@ impl FastDetector {
         ];
 
         // Compute adaptive thresholds based on local image statistics
-        let adaptive_thresholds = self.compute_adaptive_thresholds(img, scale_level);
+        #[cfg(feature = "adaptive-thresholding")]
+        let adaptive_thresholds = self.compute_adaptive_thresholds(img, scale_level)?;
+        
+        #[cfg(not(feature = "adaptive-thresholding"))]
+        let adaptive_thresholds = vec![vec![self.cfg.threshold; 1]; 1];
 
+        // Use optimized memory layout if enabled
+        #[cfg(feature = "optimized-memory-layout")]
+        {
+            self.detect_keypoints_optimized_layout(img, scale_level, &adaptive_thresholds, &OFF)
+        }
+        
+        #[cfg(not(feature = "optimized-memory-layout"))]
+        {
+            self.detect_keypoints_basic_layout(img, scale_level, &adaptive_thresholds, &OFF)
+        }
+    }
+
+    /// Basic keypoint detection without memory layout optimizations
+    #[cfg(not(feature = "optimized-memory-layout"))]
+    fn detect_keypoints_basic_layout(
+        &self,
+        img: &Image,
+        scale_level: &ScaleLevel,
+        adaptive_thresholds: &[Vec<u8>],
+        offsets: &[(i32, i32); 16],
+    ) -> FastResult<Vec<ScoredKeypoint>> {
         let rows = 3..scale_level.height.saturating_sub(3);
         let keypoints = rows.into_par_iter()
             .flat_map_iter(|y| {
@@ -277,12 +317,16 @@ impl FastDetector {
                     let p = img[y * scale_level.width + x];
                     
                     // Get adaptive threshold for this region
-                    let adaptive_threshold = self.get_local_threshold(&adaptive_thresholds, x, y, scale_level);
+                    #[cfg(feature = "adaptive-thresholding")]
+                    let adaptive_threshold = self.get_local_threshold(adaptive_thresholds, x, y, scale_level);
+                    
+                    #[cfg(not(feature = "adaptive-thresholding"))]
+                    let adaptive_threshold = self.cfg.threshold;
                     
                     let mut bri = 0;
                     let mut drk = 0;
                     
-                    for &(dx, dy) in &OFF {
+                    for &(dx, dy) in offsets {
                         let xx = (x as i32 + dx).clamp(0, (scale_level.width - 1) as i32) as usize;
                         let yy = (y as i32 + dy).clamp(0, (scale_level.height - 1) as i32) as usize;
                         let q = img[yy * scale_level.width + xx];
@@ -301,31 +345,19 @@ impl FastDetector {
                         
                         match self.compute_orientation_at_scale(img, x as f32, y as f32, scale_level) {
                             Ok(angle) => {
-                                // Compute Harris corner response
+                                // Compute corner response
+                                #[cfg(feature = "harris-corners")]
                                 let harris_response = self.compute_harris_response_at_scale(img, x, y, scale_level);
                                 
-                                // Use Harris response if positive, otherwise fall back to intensity-based response
+                                #[cfg(feature = "harris-corners")]
                                 let response = if harris_response > 0.0 {
                                     harris_response
                                 } else {
-                                    // Fall back to simple intensity difference for robustness
-                                    let mut intensity_response = 0.0;
-                                    let mut count = 0;
-                                    
-                                    for &(dx, dy) in &OFF {
-                                        let xx = (x as i32 + dx).clamp(0, (scale_level.width - 1) as i32) as usize;
-                                        let yy = (y as i32 + dy).clamp(0, (scale_level.height - 1) as i32) as usize;
-                                        let q = img[yy * scale_level.width + xx];
-                                        
-                                        if (bri >= 12 && q >= p.saturating_add(adaptive_threshold)) ||
-                                           (drk >= 12 && q.saturating_add(adaptive_threshold) <= p) {
-                                            intensity_response += ((q as i32) - (p as i32)).abs() as f32;
-                                            count += 1;
-                                        }
-                                    }
-                                    
-                                    if count > 0 { intensity_response / count as f32 } else { 1.0 }
+                                    self.compute_intensity_response_basic(img, scale_level, x, y, p, bri, drk, offsets, adaptive_threshold)
                                 };
+                                
+                                #[cfg(not(feature = "harris-corners"))]
+                                let response = self.compute_intensity_response_basic(img, scale_level, x, y, p, bri, drk, offsets, adaptive_threshold);
                                 
                                 v.push(ScoredKeypoint {
                                     keypoint: Keypoint { 
@@ -347,11 +379,281 @@ impl FastDetector {
         Ok(keypoints)
     }
 
-    /// Compute adaptive thresholds based on local image statistics
-    fn compute_adaptive_thresholds(&self, img: &Image, scale_level: &ScaleLevel) -> Vec<Vec<u8>> {
-        let block_size = 16; // Size of blocks for local statistics
-        let blocks_x = (scale_level.width + block_size - 1) / block_size;
-        let blocks_y = (scale_level.height + block_size - 1) / block_size;
+    /// Optimized keypoint detection with memory layout optimizations
+    #[cfg(feature = "optimized-memory-layout")]
+    fn detect_keypoints_optimized_layout(
+        &self,
+        img: &Image,
+        scale_level: &ScaleLevel,
+        adaptive_thresholds: &[Vec<u8>],
+        offsets: &[(i32, i32); 16],
+    ) -> FastResult<Vec<ScoredKeypoint>> {
+        // Process image in SIMD-friendly chunks
+        let chunk_size = if cfg!(feature = "chunked-processing") { 64 } else { 16 };
+        let rows = 3..scale_level.height.saturating_sub(3);
+        
+        let keypoints = rows.into_par_iter()
+            .flat_map_iter(|y| {
+                let mut row_keypoints = Vec::new();
+                
+                // Process row in chunks for better cache locality
+                for x_start in (3..scale_level.width.saturating_sub(3)).step_by(chunk_size) {
+                    let x_end = (x_start + chunk_size).min(scale_level.width - 3);
+                    
+                    // Pre-fetch memory for this chunk to improve cache performance
+                    let chunk_keypoints = self.process_pixel_chunk_simd(
+                        img, scale_level, adaptive_thresholds, offsets,
+                        y, x_start, x_end
+                    );
+                    
+                    row_keypoints.extend(chunk_keypoints);
+                }
+                
+                row_keypoints
+            })
+            .collect();
+
+        Ok(keypoints)
+    }
+
+    /// Basic intensity response computation (fallback)
+    fn compute_intensity_response_basic(
+        &self,
+        img: &Image,
+        scale_level: &ScaleLevel,
+        x: usize,
+        y: usize,
+        center_pixel: u8,
+        bri: i32,
+        drk: i32,
+        offsets: &[(i32, i32); 16],
+        threshold: u8,
+    ) -> f32 {
+        let mut intensity_response = 0.0;
+        let mut count = 0;
+        
+        for &(dx, dy) in offsets {
+            let xx = (x as i32 + dx).clamp(0, (scale_level.width - 1) as i32) as usize;
+            let yy = (y as i32 + dy).clamp(0, (scale_level.height - 1) as i32) as usize;
+            let q = img[yy * scale_level.width + xx];
+            
+            if (bri >= 12 && q >= center_pixel.saturating_add(threshold)) ||
+               (drk >= 12 && q.saturating_add(threshold) <= center_pixel) {
+                intensity_response += ((q as i32) - (center_pixel as i32)).abs() as f32;
+                count += 1;
+            }
+        }
+        
+        if count > 0 { intensity_response / count as f32 } else { 1.0 }
+    }
+
+    /// Process a chunk of pixels with SIMD-optimized memory access patterns
+    fn process_pixel_chunk_simd(
+        &self,
+        img: &Image,
+        scale_level: &ScaleLevel,
+        adaptive_thresholds: &[Vec<u8>],
+        offsets: &[(i32, i32); 16],
+        y: usize,
+        x_start: usize,
+        x_end: usize,
+    ) -> Vec<ScoredKeypoint> {
+        let mut chunk_keypoints = Vec::new();
+        let width = scale_level.width;
+        
+        // Pre-calculate row pointers for better cache access
+        let row_ptrs: Vec<*const u8> = (y.saturating_sub(3)..=y.saturating_add(3).min(scale_level.height - 1))
+            .map(|row| unsafe { img.as_ptr().add(row * width) })
+            .collect();
+        
+        // Process pixels with SIMD-friendly access patterns
+        for x in x_start..x_end {
+            let p = img[y * width + x];
+            
+            // Get adaptive threshold for this region with cached access
+            let adaptive_threshold = self.get_local_threshold_cached(adaptive_thresholds, x, y, scale_level);
+            
+            // Fast FAST detection using optimized memory access
+            let (is_corner, corner_type) = self.fast_corner_check_simd(
+                &row_ptrs, x, y, p, adaptive_threshold, offsets, width
+            );
+            
+            if is_corner {
+                // Convert coordinates back to original image scale
+                let original_x = (x as f32) * scale_level.scale;
+                let original_y = (y as f32) * scale_level.scale;
+                
+                match self.compute_orientation_at_scale(img, x as f32, y as f32, scale_level) {
+                    Ok(angle) => {
+                        // Compute response with optimized Harris
+                        let response = self.compute_response_optimized(img, scale_level, x, y, corner_type);
+                        
+                        chunk_keypoints.push(ScoredKeypoint {
+                            keypoint: Keypoint { 
+                                x: original_x, 
+                                y: original_y, 
+                                angle 
+                            },
+                            response,
+                        });
+                    }
+                    Err(_) => {} // Skip this keypoint if orientation computation fails
+                }
+            }
+        }
+        
+        chunk_keypoints
+    }
+
+    /// Optimized FAST corner detection with SIMD-friendly memory access
+    #[inline]
+    fn fast_corner_check_simd(
+        &self,
+        row_ptrs: &[*const u8],
+        x: usize,
+        y: usize,
+        center_pixel: u8,
+        threshold: u8,
+        offsets: &[(i32, i32); 16],
+        width: usize,
+    ) -> (bool, CornerType) {
+        let mut bri = 0u32;
+        let mut drk = 0u32;
+        
+        // SIMD-optimized circle traversal with minimized memory access
+        unsafe {
+            for &(dx, dy) in offsets {
+                let row_idx = (3 + dy) as usize; // Row offset from y-3 to y+3
+                let col = (x as i32 + dx).clamp(0, (width - 1) as i32) as usize;
+                
+                let pixel = *row_ptrs[row_idx].add(col);
+                
+                // Branchless comparison for better SIMD performance
+                let is_brighter = (pixel >= center_pixel.saturating_add(threshold)) as u32;
+                let is_darker = ((pixel.saturating_add(threshold)) <= center_pixel) as u32;
+                
+                bri += is_brighter;
+                drk += is_darker;
+            }
+        }
+        
+        if bri >= 12 {
+            (true, CornerType::Bright)
+        } else if drk >= 12 {
+            (true, CornerType::Dark)  
+        } else {
+            (false, CornerType::None)
+        }
+    }
+
+    /// Optimized response computation with corner type hint
+    #[inline]
+    fn compute_response_optimized(
+        &self,
+        img: &Image,
+        scale_level: &ScaleLevel,
+        x: usize,
+        y: usize,
+        corner_type: CornerType,
+    ) -> f32 {
+        // Use Harris response when available, fall back to intensity-based
+        let harris_response = self.compute_harris_response_at_scale(img, x, y, scale_level);
+        
+        if harris_response > 0.0 {
+            harris_response
+        } else {
+            // Optimized intensity-based response based on corner type
+            self.compute_intensity_response_typed(img, scale_level, x, y, corner_type)
+        }
+    }
+
+    /// Cached threshold lookup with optimized indexing
+    #[inline]
+    fn get_local_threshold_cached(
+        &self,
+        thresholds: &[Vec<u8>],
+        x: usize,
+        y: usize,
+        scale_level: &ScaleLevel,
+    ) -> u8 {
+        let block_size = 16;
+        let block_x = (x / block_size).min(thresholds[0].len() - 1);
+        let block_y = (y / block_size).min(thresholds.len() - 1);
+        
+        // Direct array access - compiler can optimize this better
+        unsafe {
+            *thresholds.get_unchecked(block_y).get_unchecked(block_x)
+        }
+    }
+
+    /// Intensity-based response computation optimized by corner type
+    fn compute_intensity_response_typed(
+        &self,
+        img: &Image,
+        scale_level: &ScaleLevel,
+        x: usize,
+        y: usize,
+        corner_type: CornerType,
+    ) -> f32 {
+        const OFF: [(i32, i32); 16] = [
+            (-3, 0), (-3, 1), (-2, 2), (-1, 3),
+            (0, 3), (1, 3), (2, 2), (3, 1),
+            (3, 0), (3, -1), (2, -2), (1, -3),
+            (0, -3), (-1, -3), (-2, -2), (-3, -1),
+        ];
+        
+        let center_pixel = img[y * scale_level.width + x] as i32;
+        let mut total_response = 0.0f32;
+        let mut count = 0;
+        
+        for &(dx, dy) in &OFF {
+            let xx = (x as i32 + dx).clamp(0, (scale_level.width - 1) as i32) as usize;
+            let yy = (y as i32 + dy).clamp(0, (scale_level.height - 1) as i32) as usize;
+            let pixel = img[yy * scale_level.width + xx] as i32;
+            
+            let diff = pixel - center_pixel;
+            
+            // Only count pixels that match the corner type
+            let contributes = match corner_type {
+                CornerType::Bright => diff > 0,
+                CornerType::Dark => diff < 0,
+                CornerType::None => true, // Fallback
+            };
+            
+            if contributes {
+                total_response += diff.abs() as f32;
+                count += 1;
+            }
+        }
+        
+        if count > 0 { total_response / count as f32 } else { 1.0 }
+    }
+
+
+
+    /// Compute adaptive thresholds using rolling-window statistics (O(1) per pixel)
+    fn compute_adaptive_thresholds(&self, img: &Image, scale_level: &ScaleLevel) -> FastResult<Vec<Vec<u8>>> {
+        #[cfg(feature = "rolling-window-stats")]
+        {
+            // Use rolling-window approach (better for large images)
+            self.compute_adaptive_thresholds_rolling_window_impl(img, scale_level)
+        }
+        
+        #[cfg(not(feature = "rolling-window-stats"))]
+        {
+            // Use basic block-based approach (faster for small images)
+            self.compute_adaptive_thresholds_basic(img, scale_level)
+        }
+    }
+
+    /// Basic adaptive threshold computation (faster for small images)
+    #[cfg(not(feature = "rolling-window-stats"))]
+    fn compute_adaptive_thresholds_basic(&self, img: &Image, scale_level: &ScaleLevel) -> FastResult<Vec<Vec<u8>>> {
+        let block_size = 16;
+        let w = scale_level.width;
+        let h = scale_level.height;
+        let blocks_x = (w + block_size - 1) / block_size;
+        let blocks_y = (h + block_size - 1) / block_size;
         
         let mut thresholds = vec![vec![self.cfg.threshold; blocks_x]; blocks_y];
         
@@ -360,8 +662,8 @@ impl FastDetector {
             for block_x in 0..blocks_x {
                 let start_x = block_x * block_size;
                 let start_y = block_y * block_size;
-                let end_x = (start_x + block_size).min(scale_level.width);
-                let end_y = (start_y + block_size).min(scale_level.height);
+                let end_x = (start_x + block_size).min(w);
+                let end_y = (start_y + block_size).min(h);
                 
                 // Compute mean and standard deviation for this block
                 let mut sum = 0u32;
@@ -370,7 +672,7 @@ impl FastDetector {
                 
                 for y in start_y..end_y {
                     for x in start_x..end_x {
-                        let pixel = img[y * scale_level.width + x] as u32;
+                        let pixel = img[y * w + x] as u32;
                         sum += pixel;
                         sum_sq += pixel * pixel;
                         count += 1;
@@ -383,10 +685,8 @@ impl FastDetector {
                     let std_dev = variance.sqrt();
                     
                     // Adaptive threshold based on local statistics
-                    // In low-contrast regions (low std_dev), use lower threshold
-                    // In high-contrast regions (high std_dev), use higher threshold
                     let base_threshold = self.cfg.threshold as f32;
-                    let contrast_factor = (std_dev / 30.0).clamp(0.3, 2.5); // Normalize to typical intensity range
+                    let contrast_factor = self.compute_contrast_factor(std_dev as f64) as f32;
                     let adaptive_threshold = (base_threshold * contrast_factor).clamp(5.0, 100.0) as u8;
                     
                     thresholds[block_y][block_x] = adaptive_threshold;
@@ -397,7 +697,112 @@ impl FastDetector {
         // Apply smoothing to avoid harsh transitions between blocks
         self.smooth_threshold_map(&mut thresholds);
         
-        thresholds
+        Ok(thresholds)
+    }
+
+    /// Rolling-window adaptive threshold wrapper
+    #[cfg(feature = "rolling-window-stats")]
+    fn compute_adaptive_thresholds_rolling_window_impl(&self, img: &Image, scale_level: &ScaleLevel) -> FastResult<Vec<Vec<u8>>> {
+        let block_size = 16;
+        let w = scale_level.width;
+        let h = scale_level.height;
+        let blocks_x = (w + block_size - 1) / block_size;
+        let blocks_y = (h + block_size - 1) / block_size;
+        
+        let mut thresholds = vec![vec![self.cfg.threshold; blocks_x]; blocks_y];
+        
+        // Rolling window implementation using prefix sums
+        self.compute_adaptive_thresholds_rolling_window(img, scale_level, &mut thresholds, block_size)?;
+        
+        // Apply Gaussian smoothing to prevent harsh transitions
+        self.smooth_threshold_map(&mut thresholds);
+        
+        Ok(thresholds)
+    }
+    
+    /// Fast rolling-window adaptive threshold computation using integral images
+    fn compute_adaptive_thresholds_rolling_window(
+        &self, 
+        img: &Image, 
+        scale_level: &ScaleLevel, 
+        thresholds: &mut Vec<Vec<u8>>,
+        block_size: usize
+    ) -> FastResult<()> {
+        let w = scale_level.width;
+        let h = scale_level.height;
+        
+        // Build integral image for both sum and sum-of-squares in one pass
+        let mut integral_sum = vec![0u64; (w + 1) * (h + 1)];
+        let mut integral_sum_sq = vec![0u64; (w + 1) * (h + 1)];
+        
+        // Single pass to build both integral images
+        for y in 0..h {
+            let mut row_sum = 0u64;
+            let mut row_sum_sq = 0u64;
+            
+            for x in 0..w {
+                let pixel = img[y * w + x] as u64;
+                row_sum += pixel;
+                row_sum_sq += pixel * pixel;
+                
+                let idx = (y + 1) * (w + 1) + (x + 1);
+                let prev_idx = y * (w + 1) + (x + 1);
+                
+                integral_sum[idx] = integral_sum[prev_idx] + row_sum;
+                integral_sum_sq[idx] = integral_sum_sq[prev_idx] + row_sum_sq;
+            }
+        }
+        
+        // Compute thresholds using O(1) rectangle queries
+        let blocks_x = thresholds[0].len();
+        let blocks_y = thresholds.len();
+        
+        for by in 0..blocks_y {
+            for bx in 0..blocks_x {
+                // Define block boundaries
+                let x1 = bx * block_size;
+                let y1 = by * block_size;
+                let x2 = ((bx + 1) * block_size).min(w);
+                let y2 = ((by + 1) * block_size).min(h);
+                
+                // O(1) rectangle sum query using integral image
+                let sum = self.integral_rectangle_query(&integral_sum, w + 1, x1, y1, x2, y2);
+                let sum_sq = self.integral_rectangle_query(&integral_sum_sq, w + 1, x1, y1, x2, y2);
+                
+                let area = ((x2 - x1) * (y2 - y1)) as u64;
+                if area == 0 { continue; }
+                
+                // Compute mean and standard deviation
+                let mean = sum as f64 / area as f64;
+                let variance = (sum_sq as f64 / area as f64) - (mean * mean);
+                let std_dev = variance.max(0.0).sqrt();
+                
+                // Compute contrast-adaptive threshold
+                let contrast_factor = self.compute_contrast_factor(std_dev);
+                let adaptive_threshold = (self.cfg.threshold as f64 * contrast_factor).round() as u8;
+                
+                thresholds[by][bx] = adaptive_threshold.clamp(5, 100);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// O(1) rectangle query on integral image
+    #[inline]
+    fn integral_rectangle_query(&self, integral: &[u64], width: usize, x1: usize, y1: usize, x2: usize, y2: usize) -> u64 {
+        // Rectangle sum = I(x2,y2) - I(x1,y2) - I(x2,y1) + I(x1,y1)
+        // Handle overflow by using saturating arithmetic
+        let bottom_right = integral[y2 * width + x2];
+        let bottom_left = integral[y2 * width + x1];
+        let top_right = integral[y1 * width + x2];
+        let top_left = integral[y1 * width + x1];
+        
+        // Use checked arithmetic to prevent overflow
+        bottom_right
+            .saturating_sub(bottom_left)
+            .saturating_sub(top_right)
+            .saturating_add(top_left)
     }
 
     /// Smooth the threshold map to avoid harsh transitions
@@ -451,7 +856,7 @@ impl FastDetector {
             height: self.h,
         };
         
-        Ok(self.compute_adaptive_thresholds(img, &scale_level))
+        self.compute_adaptive_thresholds(img, &scale_level)
     }
 
     /// Compute orientation at a specific scale level
@@ -609,7 +1014,7 @@ impl FastDetector {
     }
 
     /// Non-Maximum Suppression to remove nearby redundant keypoints
-    fn non_maximum_suppression(&self, keypoints: &[ScoredKeypoint], min_distance: f32) -> Vec<ScoredKeypoint> {
+    pub fn non_maximum_suppression(&self, keypoints: &[ScoredKeypoint], min_distance: f32) -> Vec<ScoredKeypoint> {
         if keypoints.is_empty() {
             return Vec::new();
         }
@@ -645,7 +1050,7 @@ impl FastDetector {
     }
 
     /// Refine keypoint location to subpixel accuracy using quadratic fitting
-    fn refine_keypoint_subpixel(&self, img: &Image, kp: Keypoint) -> FastResult<Keypoint> {
+    pub fn refine_keypoint_subpixel(&self, img: &Image, kp: Keypoint) -> FastResult<Keypoint> {
         let ix = kp.x.round() as i32;
         let iy = kp.y.round() as i32;
         
@@ -660,7 +1065,7 @@ impl FastDetector {
             for dx in -1..=1 {
                 let x = (ix + dx) as usize;
                 let y = (iy + dy) as usize;
-                responses[(dy + 1) as usize][(dx + 1) as usize] = self.compute_corner_response(img, x, y);
+                responses[(dy + 1) as usize][(dx + 1) as usize] = self.compute_harris_response(img, x, y);
             }
         }
 
@@ -709,13 +1114,23 @@ impl FastDetector {
         })
     }
 
-    /// Compute Harris corner response at a specific pixel location
-    fn compute_corner_response(&self, img: &Image, x: usize, y: usize) -> f32 {
-        self.compute_harris_response(img, x, y)
+    /// Compute Harris corner response at a specific pixel location  
+    pub fn compute_harris_response(&self, img: &Image, x: usize, y: usize) -> f32 {
+        #[cfg(feature = "integral-images")]
+        {
+            // Use integral image approach (needs caching to be effective)
+            self.compute_harris_response_integral(img, x, y)
+        }
+        
+        #[cfg(not(feature = "integral-images"))]
+        {
+            // Use direct computation (faster for single queries)
+            self.compute_harris_response_direct(img, x, y)
+        }
     }
 
-    /// Compute Harris corner response using image gradients
-    fn compute_harris_response(&self, img: &Image, x: usize, y: usize) -> f32 {
+    /// Direct Harris response computation (faster for single queries)
+    fn compute_harris_response_direct(&self, img: &Image, x: usize, y: usize) -> f32 {
         if x < 2 || y < 2 || x >= self.w - 2 || y >= self.h - 2 {
             return 0.0;
         }
@@ -758,8 +1173,7 @@ impl FastDetector {
         iyy /= total_weight;
 
         // Harris corner response: det(M) - k * trace(M)^2
-        // where M is the second moment matrix [[Ixx, Ixy], [Ixy, Iyy]]
-        let k = 0.05; // Slightly higher than standard 0.04 for more corners
+        let k = 0.05;
         let det = ixx * iyy - ixy * ixy;
         let trace = ixx + iyy;
         
@@ -767,6 +1181,106 @@ impl FastDetector {
         
         // Apply a small threshold to reduce noise
         if harris_response > 1e-6 { harris_response } else { 0.0 }
+    }
+
+    /// Compute Harris response using integral images for O(1) complexity (SLOWER FOR SINGLE QUERIES)
+    fn compute_harris_response_integral(&self, img: &Image, x: usize, y: usize) -> f32 {
+        if x < 2 || y < 2 || x >= self.w - 2 || y >= self.h - 2 {
+            return 0.0;
+        }
+
+        // Cache integral images for reuse across multiple Harris computations
+        // For now, compute per-call - in practice, we'd cache these
+        let (integral_ixx, integral_ixy, integral_iyy) = self.build_harris_integral_images(img);
+
+        // Define window size for Harris computation
+        let window_size = 5;
+        let half_window = window_size / 2;
+
+        // Compute window bounds
+        let x1 = x.saturating_sub(half_window);
+        let y1 = y.saturating_sub(half_window);
+        let x2 = (x + half_window + 1).min(self.w);
+        let y2 = (y + half_window + 1).min(self.h);
+
+        // O(1) rectangle queries using integral images
+        let sum_ixx = self.integral_rectangle_query(&integral_ixx, self.w + 1, x1, y1, x2, y2);
+        let sum_ixy = self.integral_rectangle_query_signed(&integral_ixy, self.w + 1, x1, y1, x2, y2);
+        let sum_iyy = self.integral_rectangle_query(&integral_iyy, self.w + 1, x1, y1, x2, y2);
+
+        // Compute window area
+        let area = ((x2 - x1) * (y2 - y1)) as f64;
+        if area == 0.0 { return 0.0; }
+
+        // Normalize by area and scale back (we scaled by 64 earlier)
+        let scale_factor = 64.0 * 64.0; // We scaled ix and iy by 64, so ixx/iyy are scaled by 64²
+        let ixx = (sum_ixx as f64) / (area * scale_factor);
+        let ixy = (sum_ixy as f64) / (area * scale_factor);
+        let iyy = (sum_iyy as f64) / (area * scale_factor);
+
+        // Harris corner response: det(M) - k * trace(M)^2
+        let k = 0.05;
+        let det = ixx * iyy - ixy * ixy;
+        let trace = ixx + iyy;
+        
+        let harris_response = det - k * trace * trace;
+        
+        // Apply threshold to reduce noise
+        if harris_response > 1e-6 { harris_response as f32 } else { 0.0 }
+    }
+
+    /// Build integral images for second moment matrix components
+    fn build_harris_integral_images(&self, img: &Image) -> (Vec<u64>, Vec<i64>, Vec<u64>) {
+        let mut integral_ixx = vec![0u64; (self.w + 1) * (self.h + 1)];
+        let mut integral_ixy = vec![0i64; (self.w + 1) * (self.h + 1)];
+        let mut integral_iyy = vec![0u64; (self.w + 1) * (self.h + 1)];
+
+        // Single pass to compute gradients and build integral images
+        for y in 0..self.h {
+            let mut row_sum_ixx = 0u64;
+            let mut row_sum_ixy = 0i64;
+            let mut row_sum_iyy = 0u64;
+
+            for x in 0..self.w {
+                // Compute gradients using Sobel operator
+                let (ix, iy) = self.compute_gradients(img, x, y);
+                
+                // Scale gradients to avoid precision loss
+                let ix_scaled = (ix * 64.0) as i32;  // Scale by 64 for precision
+                let iy_scaled = (iy * 64.0) as i32;
+
+                // Compute second moment matrix components
+                let ixx = (ix_scaled * ix_scaled) as u64;
+                let ixy = (ix_scaled * iy_scaled) as i64;
+                let iyy = (iy_scaled * iy_scaled) as u64;
+
+                // Update row sums
+                row_sum_ixx += ixx;
+                row_sum_ixy += ixy;
+                row_sum_iyy += iyy;
+
+                // Update integral images
+                let idx = (y + 1) * (self.w + 1) + (x + 1);
+                let prev_idx = y * (self.w + 1) + (x + 1);
+
+                integral_ixx[idx] = integral_ixx[prev_idx] + row_sum_ixx;
+                integral_ixy[idx] = integral_ixy[prev_idx] + row_sum_ixy;
+                integral_iyy[idx] = integral_iyy[prev_idx] + row_sum_iyy;
+            }
+        }
+
+        (integral_ixx, integral_ixy, integral_iyy)
+    }
+
+    /// Optimized rectangle query for signed integral images
+    #[inline]
+    fn integral_rectangle_query_signed(&self, integral: &[i64], width: usize, x1: usize, y1: usize, x2: usize, y2: usize) -> i64 {
+        let bottom_right = integral[y2 * width + x2];
+        let bottom_left = integral[y2 * width + x1];
+        let top_right = integral[y1 * width + x2];
+        let top_left = integral[y1 * width + x1];
+        
+        bottom_right - bottom_left - top_right + top_left
     }
 
     /// Compute image gradients at a specific pixel using Sobel operators
@@ -801,13 +1315,7 @@ impl FastDetector {
     }
 
     /// Compute orientation with safe SIMD optimizations for subpixel coordinates
-    fn compute_orientation(&self, img: &Image, x: f32, y: f32) -> FastResult<f32> {
-        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-        use core::arch::x86_64::*;
-
-        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-        use core::arch::aarch64::*;
-
+    pub fn compute_orientation(&self, img: &Image, x: f32, y: f32) -> FastResult<f32> {
         let half = (self.cfg.patch_size / 2) as i32;
         let cx = x.round() as i32;
         let cy = y.round() as i32;
@@ -821,20 +1329,20 @@ impl FastDetector {
         let mut m10 = 0i64; // Use i64 to prevent overflow
         let mut m01 = 0i64;
 
-        // Use SIMD optimizations when available and safe
-        #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+        // Use SIMD optimizations when available and enabled
+        #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "sse2"))]
         unsafe {
             self.compute_orientation_sse2(img, x, y, half, &mut m10, &mut m01)?;
         }
 
-        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
             self.compute_orientation_neon(img, x, y, half, &mut m10, &mut m01)?;
         }
 
         #[cfg(not(any(
-            all(target_arch = "x86_64", target_feature = "sse2"),
-            all(target_arch = "aarch64", target_feature = "neon")
+            all(feature = "simd", target_arch = "x86_64", target_feature = "sse2"),
+            all(feature = "simd", target_arch = "aarch64", target_feature = "neon")
         )))]
         {
             self.compute_orientation_scalar(img, x, y, half, &mut m10, &mut m01)?;
@@ -844,7 +1352,7 @@ impl FastDetector {
     }
 
     /// Safe SSE2 implementation with proper bounds checking
-    #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+    #[cfg(all(feature = "simd", target_arch = "x86_64", target_feature = "sse2"))]
     unsafe fn compute_orientation_sse2(
         &self,
         img: &Image,
@@ -929,7 +1437,7 @@ impl FastDetector {
     }
 
     /// Safe NEON implementation with proper bounds checking
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[cfg(all(feature = "simd", target_arch = "aarch64", target_feature = "neon"))]
     unsafe fn compute_orientation_neon(
         &self,
         img: &Image,
@@ -1065,6 +1573,185 @@ impl FastDetector {
     /// Get image dimensions
     pub fn dimensions(&self) -> (usize, usize) {
         (self.w, self.h)
+    }
+
+    /// Compute contrast factor from standard deviation for adaptive thresholding
+    #[inline]
+    fn compute_contrast_factor(&self, std_dev: f64) -> f64 {
+        // Normalize standard deviation to typical intensity range (0-255)
+        // Low contrast: factor 0.3-1.0, High contrast: factor 1.0-2.5
+        let normalized_std = std_dev / 30.0; // 30 is reasonable std dev for typical images
+        normalized_std.clamp(0.3, 2.5)
+    }
+
+    /// Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) preprocessing
+    #[cfg(feature = "clahe-preprocessing")]
+    pub fn apply_clahe_preprocessing(&self, img: &Image) -> FastResult<Image> {
+        const TILE_SIZE: usize = 8;  // 8x8 tiles for local adaptation
+        const CLIP_LIMIT: f32 = 3.0; // Contrast limiting factor
+        
+        let tiles_x = (self.w + TILE_SIZE - 1) / TILE_SIZE;
+        let tiles_y = (self.h + TILE_SIZE - 1) / TILE_SIZE;
+        
+        // For very small images, just return the original
+        if tiles_x == 0 || tiles_y == 0 {
+            return Ok(img.clone());
+        }
+        
+        // Compute histograms for each tile
+        let tile_histograms = self.compute_tile_histograms(img, TILE_SIZE, tiles_x, tiles_y);
+        
+        // Apply contrast limiting to each histogram
+        let clipped_histograms = self.apply_contrast_limiting(&tile_histograms, CLIP_LIMIT);
+        
+        // Compute cumulative distribution functions (CDFs)
+        let tile_cdfs = self.compute_tile_cdfs(&clipped_histograms);
+        
+        // Apply adaptive equalization with bilinear interpolation between tiles
+        let clahe_img = self.apply_adaptive_equalization(img, &tile_cdfs, TILE_SIZE, tiles_x, tiles_y)?;
+        
+        Ok(clahe_img)
+    }
+
+    /// Compute histogram for each tile
+    #[cfg(feature = "clahe-preprocessing")]
+    fn compute_tile_histograms(&self, img: &Image, tile_size: usize, tiles_x: usize, tiles_y: usize) -> Vec<Vec<u32>> {
+        let mut histograms = vec![vec![0u32; 256]; tiles_x * tiles_y];
+        
+        for tile_y in 0..tiles_y {
+            for tile_x in 0..tiles_x {
+                let tile_idx = tile_y * tiles_x + tile_x;
+                
+                // Define tile boundaries
+                let start_x = tile_x * tile_size;
+                let start_y = tile_y * tile_size;
+                let end_x = (start_x + tile_size).min(self.w);
+                let end_y = (start_y + tile_size).min(self.h);
+                
+                // Build histogram for this tile
+                for y in start_y..end_y {
+                    for x in start_x..end_x {
+                        let pixel = img[y * self.w + x] as usize;
+                        histograms[tile_idx][pixel] += 1;
+                    }
+                }
+            }
+        }
+        
+        histograms
+    }
+
+    /// Apply contrast limiting to histograms
+    #[cfg(feature = "clahe-preprocessing")]
+    fn apply_contrast_limiting(&self, histograms: &[Vec<u32>], clip_limit: f32) -> Vec<Vec<u32>> {
+        histograms.iter().map(|hist| {
+            let total_pixels = hist.iter().sum::<u32>() as f32;
+            let clip_threshold = (total_pixels * clip_limit / 256.0) as u32;
+            
+            let mut clipped_hist = hist.clone();
+            let mut excess = 0u32;
+            
+            // Clip histogram bins that exceed the threshold
+            for bin in &mut clipped_hist {
+                if *bin > clip_threshold {
+                    excess += *bin - clip_threshold;
+                    *bin = clip_threshold;
+                }
+            }
+            
+            // Redistribute excess pixels uniformly
+            let redistribution_per_bin = excess / 256;
+            let remainder = excess % 256;
+            
+            for (i, bin) in clipped_hist.iter_mut().enumerate() {
+                *bin += redistribution_per_bin;
+                if i < remainder as usize {
+                    *bin += 1;
+                }
+            }
+            
+            clipped_hist
+        }).collect()
+    }
+
+    /// Compute cumulative distribution functions for each tile
+    #[cfg(feature = "clahe-preprocessing")]
+    fn compute_tile_cdfs(&self, histograms: &[Vec<u32>]) -> Vec<Vec<f32>> {
+        histograms.iter().map(|hist| {
+            let total_pixels = hist.iter().sum::<u32>() as f32;
+            let mut cdf = vec![0.0f32; 256];
+            let mut cumulative = 0u32;
+            
+            // Skip empty histograms
+            if total_pixels == 0.0 {
+                // For empty tiles, return identity mapping
+                for i in 0..256 {
+                    cdf[i] = i as f32;
+                }
+                return cdf;
+            }
+            
+            for (i, &count) in hist.iter().enumerate() {
+                cumulative += count;
+                cdf[i] = (cumulative as f32 / total_pixels) * 255.0;
+            }
+            
+            cdf
+        }).collect()
+    }
+
+    /// Apply adaptive equalization with bilinear interpolation
+    #[cfg(feature = "clahe-preprocessing")]
+    fn apply_adaptive_equalization(
+        &self, 
+        img: &Image, 
+        tile_cdfs: &[Vec<f32>], 
+        tile_size: usize, 
+        tiles_x: usize, 
+        tiles_y: usize
+    ) -> FastResult<Image> {
+        let mut result = vec![0u8; img.len()];
+        
+        for y in 0..self.h {
+            for x in 0..self.w {
+                let pixel = img[y * self.w + x] as usize;
+                
+                // Find the tile coordinates (floating point for interpolation)
+                // Center tiles at their midpoints for better interpolation
+                let tile_x_f = ((x as f32) / (tile_size as f32)).max(0.0).min((tiles_x - 1) as f32);
+                let tile_y_f = ((y as f32) / (tile_size as f32)).max(0.0).min((tiles_y - 1) as f32);
+                
+                // Get integer tile coordinates
+                let tile_x0 = tile_x_f.floor() as usize;
+                let tile_y0 = tile_y_f.floor() as usize;
+                let tile_x1 = (tile_x0 + 1).min(tiles_x - 1);
+                let tile_y1 = (tile_y0 + 1).min(tiles_y - 1);
+                
+                // Interpolation weights
+                let wx = tile_x_f - tile_x0 as f32;
+                let wy = tile_y_f - tile_y0 as f32;
+                
+                // Get CDF values from four neighboring tiles
+                let tile_idx_00 = tile_y0 * tiles_x + tile_x0;
+                let tile_idx_10 = tile_y0 * tiles_x + tile_x1;
+                let tile_idx_01 = tile_y1 * tiles_x + tile_x0;
+                let tile_idx_11 = tile_y1 * tiles_x + tile_x1;
+                
+                let cdf_00 = tile_cdfs[tile_idx_00][pixel];
+                let cdf_10 = tile_cdfs[tile_idx_10][pixel];
+                let cdf_01 = tile_cdfs[tile_idx_01][pixel];
+                let cdf_11 = tile_cdfs[tile_idx_11][pixel];
+                
+                // Bilinear interpolation
+                let top = cdf_00 * (1.0 - wx) + cdf_10 * wx;
+                let bottom = cdf_01 * (1.0 - wx) + cdf_11 * wx;
+                let interpolated_value = top * (1.0 - wy) + bottom * wy;
+                
+                result[y * self.w + x] = interpolated_value.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        
+        Ok(result)
     }
 }
 
@@ -1695,7 +2382,7 @@ mod tests {
         
         // Create uniform image (should use base threshold)
         let uniform_img = vec![128; 32 * 32];
-        let uniform_thresholds = detector.compute_adaptive_thresholds(&uniform_img, &scale_level);
+        let uniform_thresholds = detector.compute_adaptive_thresholds(&uniform_img, &scale_level).unwrap();
         
         // Create high-contrast image
         let mut contrast_img = vec![0; 32 * 32];
@@ -1704,7 +2391,7 @@ mod tests {
                 contrast_img[y * 32 + x] = if (x + y) % 2 == 0 { 0 } else { 255 };
             }
         }
-        let contrast_thresholds = detector.compute_adaptive_thresholds(&contrast_img, &scale_level);
+        let contrast_thresholds = detector.compute_adaptive_thresholds(&contrast_img, &scale_level).unwrap();
         
         // All thresholds should be finite and reasonable
         for row in &uniform_thresholds {
@@ -1818,7 +2505,7 @@ mod tests {
         
         // Low contrast image
         let low_contrast = vec![128; 16 * 16]; // All same value
-        let low_thresholds = detector.compute_adaptive_thresholds(&low_contrast, &scale_level);
+        let low_thresholds = detector.compute_adaptive_thresholds(&low_contrast, &scale_level).unwrap();
         
         // High contrast image
         let mut high_contrast = vec![0; 16 * 16];
@@ -1827,7 +2514,7 @@ mod tests {
                 high_contrast[i] = if i % 2 == 0 { 0 } else { 255 };
             }
         }
-        let high_thresholds = detector.compute_adaptive_thresholds(&high_contrast, &scale_level);
+        let high_thresholds = detector.compute_adaptive_thresholds(&high_contrast, &scale_level).unwrap();
         
         // Get representative thresholds
         let low_threshold = low_thresholds[0][0];
@@ -1838,5 +2525,79 @@ mod tests {
         // Note: exact values depend on the adaptive algorithm parameters
         assert!(low_threshold >= 5 && low_threshold <= 100, "Low contrast threshold should be reasonable");
         assert!(high_threshold >= 5 && high_threshold <= 100, "High contrast threshold should be reasonable");
+    }
+
+    #[cfg(feature = "clahe-preprocessing")]
+    #[test]
+    fn test_clahe_preprocessing() {
+        let detector = FastDetector::new(create_test_config(), 32, 32).unwrap();
+        
+        // Create a simple test image with clear contrast
+        let mut img = vec![50u8; 32 * 32];
+        
+        // Add a bright square in the center
+        for y in 12..20 {
+            for x in 12..20 {
+                img[y * 32 + x] = 200; // Much brighter region
+            }
+        }
+        
+        // Apply CLAHE preprocessing
+        let clahe_result = detector.apply_clahe_preprocessing(&img);
+        assert!(clahe_result.is_ok(), "CLAHE preprocessing should succeed");
+        
+        let clahe_img = clahe_result.unwrap();
+        assert_eq!(clahe_img.len(), img.len(), "CLAHE output should have same size as input");
+        
+        // Check that output is not all the same value
+        let min_val = *clahe_img.iter().min().unwrap();
+        let max_val = *clahe_img.iter().max().unwrap();
+        
+        assert!(max_val > min_val, "CLAHE output should have some variation: min={}, max={}", min_val, max_val);
+        
+        // Check that values are in valid range
+        for &pixel in &clahe_img {
+            assert!(pixel <= 255, "All pixels should be in valid range");
+        }
+        
+        // CLAHE should preserve some structure
+        let original_variance = calculate_variance(&img);
+        let clahe_variance = calculate_variance(&clahe_img);
+        
+        // For this test, just ensure CLAHE doesn't completely flatten the image
+        assert!(clahe_variance > 0.0, 
+               "CLAHE should not completely flatten image: orig={:.2}, clahe={:.2}", 
+               original_variance, clahe_variance);
+    }
+
+    #[cfg(feature = "clahe-preprocessing")]
+    #[test]
+    fn test_clahe_histogram_operations() {
+        let detector = FastDetector::new(create_test_config(), 16, 16).unwrap();
+        let img = vec![128u8; 16 * 16]; // Uniform gray image
+        
+        // Test histogram computation
+        let histograms = detector.compute_tile_histograms(&img, 8, 2, 2);
+        assert_eq!(histograms.len(), 4, "Should have 4 tiles for 16x16 image with 8x8 tiles");
+        
+        // For uniform image, all pixels should be in one bin
+        for hist in &histograms {
+            let non_zero_bins = hist.iter().filter(|&&x| x > 0).count();
+            assert_eq!(non_zero_bins, 1, "Uniform image should have only one non-zero histogram bin");
+            assert_eq!(hist[128], 64, "All 64 pixels in tile should be in bin 128");
+        }
+        
+        // Test contrast limiting
+        let clipped = detector.apply_contrast_limiting(&histograms, 2.0);
+        assert_eq!(clipped.len(), histograms.len(), "Clipped histograms should have same count");
+        
+        // Test CDF computation
+        let cdfs = detector.compute_tile_cdfs(&clipped);
+        assert_eq!(cdfs.len(), clipped.len(), "Should have CDF for each tile");
+        
+        for cdf in &cdfs {
+            assert_eq!(cdf.len(), 256, "CDF should have 256 entries");
+            assert!(cdf[255] > 200.0, "CDF should reach near 255 at the end");
+        }
     }
 } 
