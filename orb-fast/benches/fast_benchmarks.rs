@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use orb_core::{Image, OrbConfig};
 use orb_fast::FastDetector;
+use orb_fast::DetectorBuilder;
 
 /// Create benchmark image with realistic corner patterns
 fn create_benchmark_image(width: usize, height: usize, complexity: &str) -> Image {
@@ -358,6 +359,242 @@ fn bench_clahe_preprocessing(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_detector_builder_presets(c: &mut Criterion) {
+    let mut group = c.benchmark_group("DetectorBuilder Presets");
+    
+    // Test image sizes
+    let sizes = [(256, 256), (512, 512), (1024, 1024)];
+    
+    for &(width, height) in &sizes {
+        let img = create_benchmark_image(width, height, "realistic");
+        let size_name = format!("{}x{}", width, height);
+        
+        // Fast preset benchmark
+        group.bench_function(&format!("fast_preset_{}", size_name), |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .preset_fast()
+                    .threshold(25)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+        
+        // Quality preset benchmark
+        group.bench_function(&format!("quality_preset_{}", size_name), |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .preset_quality()
+                    .threshold(20)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+        
+        // Illumination robust preset benchmark
+        group.bench_function(&format!("illumination_robust_preset_{}", size_name), |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .preset_illumination_robust()
+                    .threshold(15)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+        
+        // Custom configuration benchmark
+        group.bench_function(&format!("custom_config_{}", size_name), |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .threshold(18)
+                    .patch_size(21)
+                    .nms_distance(4.5)
+                    .subpixel_refinement(true)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+    }
+    
+    group.finish();
+}
+
+fn benchmark_detector_builder_api_overhead(c: &mut Criterion) {
+    let mut group = c.benchmark_group("DetectorBuilder API Overhead");
+    
+    let (width, height) = (512, 512);
+    let img = create_benchmark_image(width, height, "realistic");
+    let config = create_test_config();
+    
+    // Direct FastDetector creation (baseline)
+    group.bench_function("direct_fastdetector_creation", |b| {
+        b.iter(|| {
+            let detector = FastDetector::new(config.clone(), width, height).unwrap();
+            detector.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    // DetectorBuilder creation
+    group.bench_function("detector_builder_creation", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(config.threshold)
+                .patch_size(config.patch_size)
+                .threads(config.n_threads)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    // Builder reuse (creating builder once, using multiple times)
+    group.bench_function("detector_builder_reuse", |b| {
+        let configured = DetectorBuilder::new(width, height)
+            .threshold(config.threshold)
+            .patch_size(config.patch_size)
+            .threads(config.n_threads)
+            .build()
+            .unwrap();
+        
+        b.iter(|| {
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    group.finish();
+}
+
+fn benchmark_detector_builder_feature_flags(c: &mut Criterion) {
+    let mut group = c.benchmark_group("DetectorBuilder Feature Flags");
+    
+    let (width, height) = (512, 512);
+    let img = create_benchmark_image(width, height, "realistic");
+    
+    // Minimal features
+    group.bench_function("minimal_features", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(25)
+                .simd(false)
+                .optimized_layout(false)
+                .harris_corners(false)
+                .adaptive_thresholding(false)
+                .clahe_preprocessing(false)
+                .subpixel_refinement(false)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    // SIMD only
+    group.bench_function("simd_only", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(25)
+                .simd(true)
+                .optimized_layout(false)
+                .harris_corners(false)
+                .adaptive_thresholding(false)
+                .clahe_preprocessing(false)
+                .subpixel_refinement(false)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    // Optimized layout only
+    group.bench_function("optimized_layout_only", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(25)
+                .simd(false)
+                .optimized_layout(true)
+                .harris_corners(false)
+                .adaptive_thresholding(false)
+                .clahe_preprocessing(false)
+                .subpixel_refinement(false)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    // All features enabled
+    group.bench_function("all_features", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(20)
+                .simd(true)
+                .optimized_layout(true)
+                .harris_corners(true)
+                .adaptive_thresholding(true)
+                .clahe_preprocessing(true)
+                .subpixel_refinement(true)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    group.finish();
+}
+
+fn benchmark_detector_builder_configuration_impact(c: &mut Criterion) {
+    let mut group = c.benchmark_group("DetectorBuilder Configuration Impact");
+    
+    let (width, height) = (512, 512);
+    let img = create_benchmark_image(width, height, "realistic");
+    
+    // Different threshold values
+    for threshold in [10, 15, 20, 25, 30] {
+        group.bench_function(&format!("threshold_{}", threshold), |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .threshold(threshold)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+    }
+    
+    // Different NMS distances
+    for nms_distance in [2.0, 3.0, 4.0, 5.0, 6.0] {
+        group.bench_function(&format!("nms_distance_{:.1}", nms_distance), |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .threshold(20)
+                    .nms_distance(nms_distance)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+    }
+    
+    // Different patch sizes
+    for patch_size in [11, 15, 19, 23, 31] {
+        group.bench_function(&format!("patch_size_{}", patch_size), |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .threshold(20)
+                    .patch_size(patch_size)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+    }
+    
+    group.finish();
+}
+
 #[cfg(feature = "clahe-preprocessing")]
 criterion_group!(
     benches,
@@ -368,7 +605,11 @@ criterion_group!(
     bench_multiscale,
     bench_adaptive_threshold,
     bench_memory_patterns,
-    bench_clahe_preprocessing
+    bench_clahe_preprocessing,
+    benchmark_detector_builder_presets,
+    benchmark_detector_builder_api_overhead,
+    benchmark_detector_builder_feature_flags,
+    benchmark_detector_builder_configuration_impact
 );
 
 #[cfg(not(feature = "clahe-preprocessing"))]
@@ -380,7 +621,11 @@ criterion_group!(
     bench_orientation,
     bench_multiscale,
     bench_adaptive_threshold,
-    bench_memory_patterns
+    bench_memory_patterns,
+    benchmark_detector_builder_presets,
+    benchmark_detector_builder_api_overhead,
+    benchmark_detector_builder_feature_flags,
+    benchmark_detector_builder_configuration_impact
 );
 
 criterion_main!(benches); 
