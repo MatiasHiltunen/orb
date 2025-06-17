@@ -1,7 +1,7 @@
 #[cfg(feature = "serde")]
-use orb_fast::{DetectorConfig, DetectorBuilder, FastResult};
+use orb_fast::DetectorConfig;
 use orb_core::Image;
-use image::{ImageReader, GrayImage};
+use image::ImageReader;
 use std::time::Instant;
 
 #[cfg(feature = "serde")]
@@ -9,16 +9,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔧 ORB Configuration Serialization Demo");
     println!("========================================\n");
 
-    // Create and demonstrate different configurations
-    let (width, height) = (512, 512);
+    // Load test image first to get correct dimensions
+    let img_reader = ImageReader::open("lenna.png")?;
+    let img = img_reader.decode()?.to_luma8();
+    let (w, h) = img.dimensions();
+    let width = w as usize;
+    let height = h as usize;
+    let orb_image: Image = img.as_raw().clone();
+    
+    println!("📷 Image dimensions: {}x{}", width, height);
 
     // Demo 1: Create configurations
     println!("📋 Demo 1: Creating Configurations");
     
-    let fast_config = DetectorConfig::fast_preset(width, height)
+    let fast_config = DetectorConfig::ultra_fast_preset(width, height)
         .with_metadata("Production Fast", "Optimized for real-time applications");
     
-    let quality_config = DetectorConfig::quality_preset(width, height)
+    let quality_config = DetectorConfig::balanced_preset(width, height)
         .with_metadata("Research Quality", "Maximum feature detection quality");
     
     let custom_config = DetectorConfig::new(width, height)
@@ -75,10 +82,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Demo 5: Configuration-Based Detection
     println!("\n🎯 Demo 5: Configuration-Based Detection");
     
-    // Load test image
-    let img = ImageReader::open("lenna.png")?.decode()?.to_luma8();
-    let orb_image: Image = img.as_raw().clone();
-
     println!("   Running detection with different configurations:");
     
     // Test each configuration
@@ -100,9 +103,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n📊 Demo 6: Configuration Comparison");
     
     let configs_to_compare = vec![
-        ("Fast", DetectorConfig::fast_preset(width, height)),
-        ("Quality", DetectorConfig::quality_preset(width, height)),
-        ("Illumination Robust", DetectorConfig::illumination_robust_preset(width, height)),
+        ("Ultra Fast", DetectorConfig::ultra_fast_preset(width, height)),
+        ("Balanced", DetectorConfig::balanced_preset(width, height)),
+        ("Precision", DetectorConfig::precision_preset(width, height)),
     ];
     
     println!("   Configuration comparison table:");
@@ -135,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Demo 8: Round-trip Testing
     println!("\n🔄 Demo 8: Round-trip Testing");
     
-    let original = DetectorConfig::quality_preset(256, 256)
+    let original = DetectorConfig::balanced_preset(256, 256)
         .with_metadata("Round-trip Test", "Testing serialization consistency");
     
     // JSON round-trip
@@ -166,9 +169,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   • fast_config.json / fast_config.toml");
     println!("   • quality_config.json / quality_config.toml");
     println!("   • custom_config.json / custom_config.toml");
-    println!("   • fast_template.json");
-    println!("   • quality_template.json");
-    println!("   • illumination_robust_template.json");
+    println!("   • ultra_fast_template.json");
+    println!("   • balanced_template.json");
+    println!("   • precision_template.json");
 
     Ok(())
 }

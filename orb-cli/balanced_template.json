@@ -17,7 +17,7 @@
   "enable_clahe_preprocessing": false,
   "nms_distance": 2.5,
   "subpixel_refinement": true,
-  "name": "Research Quality",
-  "description": "Maximum feature detection quality",
+  "name": "Balanced",
+  "description": "Optimal balance of speed and quality for most applications",
   "version": "1.0"
 }

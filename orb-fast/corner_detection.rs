@@ -1,6 +1,7 @@
-use orb_core::Image;
-use crate::error::{FastError, FastResult};
-use crate::types::{CornerType, ScoredKeypoint, ScaleLevel};
+use orb_core::{Image, FastVariant};
+use crate::error::FastResult;
+use crate::types::{ScoredKeypoint, ScaleLevel};
+use crate::utils::has_consecutive_pixels;
 use rayon::prelude::*;
 
 /// Corner detection algorithms (FAST and Harris)
@@ -21,11 +22,13 @@ impl CornerDetector {
         scale_level: &ScaleLevel,
         adaptive_thresholds: &[Vec<u8>],
         use_optimized_layout: bool,
+        fast_variant: FastVariant,
+        use_harris: bool,
     ) -> FastResult<Vec<ScoredKeypoint>> {
         if use_optimized_layout {
-            Self::detect_keypoints_optimized_layout(img, scale_level, adaptive_thresholds, &Self::FAST_OFFSETS)
+            Self::detect_keypoints_optimized_layout(img, scale_level, adaptive_thresholds, &Self::FAST_OFFSETS, fast_variant, use_harris)
         } else {
-            Self::detect_keypoints_basic_layout(img, scale_level, adaptive_thresholds, &Self::FAST_OFFSETS)
+            Self::detect_keypoints_basic_layout(img, scale_level, adaptive_thresholds, &Self::FAST_OFFSETS, fast_variant, use_harris)
         }
     }
 
@@ -35,19 +38,22 @@ impl CornerDetector {
         scale_level: &ScaleLevel,
         adaptive_thresholds: &[Vec<u8>],
         offsets: &[(i32, i32); 16],
+        fast_variant: FastVariant,
+        use_harris: bool,
     ) -> FastResult<Vec<ScoredKeypoint>> {
         let mut keypoints = Vec::new();
         let width = scale_level.width;
         let height = scale_level.height;
+        let min_consecutive = fast_variant.min_consecutive_pixels();
 
         for y in 3..height-3 {
             for x in 3..width-3 {
                 let center_pixel = img[y * width + x];
                 let threshold = Self::get_local_threshold(adaptive_thresholds, x, y, scale_level);
                 
-                if Self::is_fast_corner(img, width, x, y, center_pixel, threshold, offsets) {
-                    let response = Self::compute_intensity_response_basic(
-                        img, scale_level, x, y, center_pixel, threshold, offsets
+                if Self::is_fast_corner(img, width, x, y, center_pixel, threshold, offsets, min_consecutive) {
+                    let response = Self::compute_enhanced_response(
+                        img, scale_level, x, y, center_pixel, threshold, offsets, use_harris
                     );
                     
                     keypoints.push(ScoredKeypoint {
@@ -71,9 +77,12 @@ impl CornerDetector {
         scale_level: &ScaleLevel,
         adaptive_thresholds: &[Vec<u8>],
         offsets: &[(i32, i32); 16],
+        fast_variant: FastVariant,
+        use_harris: bool,
     ) -> FastResult<Vec<ScoredKeypoint>> {
         let width = scale_level.width;
         let height = scale_level.height;
+        let min_consecutive = fast_variant.min_consecutive_pixels();
         const CHUNK_SIZE: usize = 64;
 
         let all_keypoints: Vec<Vec<ScoredKeypoint>> = (3..height-3)
@@ -88,7 +97,7 @@ impl CornerDetector {
                     {
                         use crate::simd::SimdOperations;
                         let chunk_keypoints = SimdOperations::process_pixel_chunk_simd(
-                            img, scale_level, adaptive_thresholds, offsets, y, x_start, x_end
+                            img, scale_level, adaptive_thresholds, offsets, y, x_start, x_end, min_consecutive, use_harris
                         );
                         row_keypoints.extend(chunk_keypoints);
                     }
@@ -99,19 +108,19 @@ impl CornerDetector {
                             let center_pixel = img[y * width + x];
                             let threshold = Self::get_local_threshold(adaptive_thresholds, x, y, scale_level);
                             
-                            if Self::is_fast_corner(img, width, x, y, center_pixel, threshold, offsets) {
-                                let response = Self::compute_intensity_response_basic(
-                                    img, scale_level, x, y, center_pixel, threshold, offsets
+                            if Self::is_fast_corner(img, width, x, y, center_pixel, threshold, offsets, min_consecutive) {
+                                let response = Self::compute_enhanced_response(
+                                    img, scale_level, x, y, center_pixel, threshold, offsets, use_harris
                                 );
                                 
-                                                                 row_keypoints.push(ScoredKeypoint {
-                                     keypoint: orb_core::Keypoint {
-                                         x: x as f32,
-                                         y: y as f32,
-                                         angle: 0.0,
-                                     },
-                                     response,
-                                 });
+                                row_keypoints.push(ScoredKeypoint {
+                                    keypoint: orb_core::Keypoint {
+                                        x: x as f32,
+                                        y: y as f32,
+                                        angle: 0.0,
+                                    },
+                                    response,
+                                });
                             }
                         }
                     }
@@ -125,7 +134,7 @@ impl CornerDetector {
         Ok(keypoints)
     }
 
-    /// Check if a pixel is a FAST corner
+    /// Check if a pixel is a FAST corner using consecutive pixel requirement
     fn is_fast_corner(
         img: &Image,
         width: usize,
@@ -134,14 +143,16 @@ impl CornerDetector {
         center_pixel: u8,
         threshold: u8,
         offsets: &[(i32, i32); 16],
+        min_consecutive: usize,
     ) -> bool {
         let center_i32 = center_pixel as i32;
         let threshold_i32 = threshold as i32;
         
-        let mut brighter_count = 0;
-        let mut darker_count = 0;
+        // Create boolean arrays for bright and dark pixels
+        let mut is_brighter = [false; 16];
+        let mut is_darker = [false; 16];
         
-        for &(dx, dy) in offsets.iter() {
+        for (i, &(dx, dy)) in offsets.iter().enumerate() {
             let px = (x as i32 + dx) as usize;
             let py = (y as i32 + dy) as usize;
             
@@ -149,15 +160,15 @@ impl CornerDetector {
                 let pixel = img[py * width + px] as i32;
                 
                 if pixel > center_i32 + threshold_i32 {
-                    brighter_count += 1;
+                    is_brighter[i] = true;
                 } else if pixel < center_i32 - threshold_i32 {
-                    darker_count += 1;
+                    is_darker[i] = true;
                 }
             }
         }
         
-        // FAST corner requires 9+ consecutive pixels above/below threshold
-        brighter_count >= 9 || darker_count >= 9
+        // Check for consecutive brighter or darker pixels using optimized utils
+        has_consecutive_pixels(&is_brighter, min_consecutive) || has_consecutive_pixels(&is_darker, min_consecutive)
     }
 
     /// Compute basic intensity response for corner
@@ -302,5 +313,41 @@ impl CornerDetector {
         // Implementation would go here for integral image optimization
         // For now, fallback to direct computation
         Self::compute_harris_response_direct(img, width, height, x, y)
+    }
+
+    /// Compute enhanced response combining FAST and Harris measures
+    fn compute_enhanced_response(
+        img: &Image,
+        scale_level: &ScaleLevel,
+        x: usize,
+        y: usize,
+        center_pixel: u8,
+        threshold: u8,
+        offsets: &[(i32, i32); 16],
+        use_harris: bool,
+    ) -> f32 {
+        // Base FAST response
+        let fast_response = Self::compute_intensity_response_basic(
+            img, scale_level, x, y, center_pixel, threshold, offsets
+        );
+
+        if !use_harris {
+            return fast_response;
+        }
+
+        // Harris corner response for additional quality measure
+        let harris_response = Self::compute_harris_response(
+            img, scale_level.width, scale_level.height, x, y
+        );
+
+        // Combine FAST and Harris responses
+        // FAST provides fast detection, Harris provides corner quality
+        let alpha = 0.7; // Weight for FAST response
+        let beta = 0.3;  // Weight for Harris response
+
+        // Normalize Harris response to similar range as FAST
+        let normalized_harris = (harris_response / 1000.0).clamp(0.0, 100.0);
+        
+        alpha * fast_response + beta * normalized_harris
     }
 } 

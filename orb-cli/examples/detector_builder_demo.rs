@@ -1,4 +1,4 @@
-use orb_fast::{DetectorBuilder, FastResult};
+use orb_fast::DetectorBuilder;
 use orb_core::Image;
 use image::{ImageReader, Rgba, RgbaImage};
 use imageproc::drawing::draw_hollow_circle_mut;
@@ -24,34 +24,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Convert to our Image format
     let orb_image: Image = img.as_raw().clone();
 
-    // Demo 1: Fast preset (minimal features, maximum speed)
-    println!("\n🚀 Demo 1: Fast Preset");
+    // Demo 1: Ultra Fast preset (minimal features, maximum speed)
+    println!("\n🚀 Demo 1: Ultra Fast Preset");
     run_detection_demo(
         DetectorBuilder::new(width, height)
-            .preset_fast()
+            .preset_ultra_fast()
             .threshold(25),
         &orb_image,
-        "fast"
+        "ultra_fast"
     )?;
 
-    // Demo 2: Quality preset (all quality features enabled)
-    println!("\n✨ Demo 2: Quality Preset");
+    // Demo 2: Balanced preset (balanced features and performance)
+    println!("\n✨ Demo 2: Balanced Preset");
     run_detection_demo(
         DetectorBuilder::new(width, height)
-            .preset_quality()
+            .preset_balanced()
             .threshold(20),
         &orb_image,
-        "quality"
+        "balanced"
     )?;
 
-    // Demo 3: Illumination robust preset
-    println!("\n🌟 Demo 3: Illumination Robust Preset");
+    // Demo 3: Precision preset
+    println!("\n🌟 Demo 3: Precision Preset");
     run_detection_demo(
         DetectorBuilder::new(width, height)
-            .preset_illumination_robust()
+            .preset_precision()
             .threshold(15),
         &orb_image,
-        "illumination_robust"
+        "precision"
     )?;
 
     // Demo 4: Custom configuration
@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .threshold(18)
             .patch_size(21)
             .threads(4)
-            .nms_distance(4.5)
+            .nms_radius(4.5)
             .subpixel_refinement(true)
             .simd(true)
             .optimized_layout(true),
@@ -83,7 +83,7 @@ fn run_detection_demo(
     builder: DetectorBuilder,
     img: &Image,
     name: &str,
-) -> FastResult<()> {
+) -> Result<(), orb_fast::FastError> {
     // Print configuration summary
     println!("   Config: {}", builder.summary());
     
@@ -118,16 +118,16 @@ fn performance_comparison(img: &Image, width: usize, height: usize) -> Result<()
     let configs = vec![
         ("Minimal", DetectorBuilder::new(width, height)
             .threshold(30)
-            .nms_distance(2.0)
+            .nms_radius(2.0)
             .subpixel_refinement(false)),
         ("Balanced", DetectorBuilder::new(width, height)
             .threshold(20)
-            .nms_distance(4.0)
+            .nms_radius(4.0)
             .subpixel_refinement(true)),
         ("Maximum", DetectorBuilder::new(width, height)
-            .preset_quality()
+            .preset_balanced()
             .threshold(15)
-            .nms_distance(5.0)),
+            .nms_radius(5.0)),
     ];
 
     println!("   Comparing different configurations:");

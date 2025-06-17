@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use orb_core::{Image, OrbConfig};
+use orb_core::{Image, OrbConfig, FastVariant};
 use orb_fast::FastDetector;
 use orb_fast::DetectorBuilder;
 
@@ -81,6 +81,8 @@ fn create_test_config() -> OrbConfig {
         threshold: 20,
         patch_size: 15,
         n_threads: 1, // Single-threaded for consistent benchmarks
+        fast_variant: FastVariant::Fast9,
+        nms_radius: 3.0,
     }
 }
 
@@ -369,11 +371,11 @@ fn benchmark_detector_builder_presets(c: &mut Criterion) {
         let img = create_benchmark_image(width, height, "realistic");
         let size_name = format!("{}x{}", width, height);
         
-        // Fast preset benchmark
-        group.bench_function(&format!("fast_preset_{}", size_name), |b| {
+        // Ultra Fast preset benchmark
+        group.bench_function(&format!("ultra_fast_preset_{}", size_name), |b| {
             b.iter(|| {
                 let configured = DetectorBuilder::new(width, height)
-                    .preset_fast()
+                    .preset_ultra_fast()
                     .threshold(25)
                     .build()
                     .unwrap();
@@ -381,11 +383,11 @@ fn benchmark_detector_builder_presets(c: &mut Criterion) {
             })
         });
         
-        // Quality preset benchmark
-        group.bench_function(&format!("quality_preset_{}", size_name), |b| {
+        // Balanced preset benchmark
+        group.bench_function(&format!("balanced_preset_{}", size_name), |b| {
             b.iter(|| {
                 let configured = DetectorBuilder::new(width, height)
-                    .preset_quality()
+                    .preset_balanced()
                     .threshold(20)
                     .build()
                     .unwrap();
@@ -393,11 +395,11 @@ fn benchmark_detector_builder_presets(c: &mut Criterion) {
             })
         });
         
-        // Illumination robust preset benchmark
-        group.bench_function(&format!("illumination_robust_preset_{}", size_name), |b| {
+        // Precision preset benchmark
+        group.bench_function(&format!("precision_preset_{}", size_name), |b| {
             b.iter(|| {
                 let configured = DetectorBuilder::new(width, height)
-                    .preset_illumination_robust()
+                    .preset_precision()
                     .threshold(15)
                     .build()
                     .unwrap();
@@ -411,7 +413,7 @@ fn benchmark_detector_builder_presets(c: &mut Criterion) {
                 let configured = DetectorBuilder::new(width, height)
                     .threshold(18)
                     .patch_size(21)
-                    .nms_distance(4.5)
+                    .nms_radius(4.5)
                     .subpixel_refinement(true)
                     .build()
                     .unwrap();
@@ -570,7 +572,7 @@ fn benchmark_detector_builder_configuration_impact(c: &mut Criterion) {
             b.iter(|| {
                 let configured = DetectorBuilder::new(width, height)
                     .threshold(20)
-                    .nms_distance(nms_distance)
+                    .nms_radius(nms_distance)
                     .build()
                     .unwrap();
                 configured.detect_keypoints(&img).unwrap()
@@ -595,6 +597,127 @@ fn benchmark_detector_builder_configuration_impact(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_fast_variants(c: &mut Criterion) {
+    let mut group = c.benchmark_group("FAST Variants");
+    
+    let (width, height) = (512, 512);
+    let img = create_benchmark_image(width, height, "realistic");
+    
+    // Test different FAST variants
+    let variants = [
+        ("FAST-6", FastVariant::custom(6)),
+        ("FAST-9", FastVariant::Fast9),
+        ("FAST-12", FastVariant::Fast12),
+        ("FAST-16", FastVariant::Fast16),
+        ("FAST-10", FastVariant::custom(10)),
+        ("FAST-14", FastVariant::custom(14)),
+    ];
+    
+    for (name, variant) in variants {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .threshold(20)
+                    .fast_variant(variant)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+    }
+    
+    group.finish();
+}
+
+fn benchmark_nms_radius_impact(c: &mut Criterion) {
+    let mut group = c.benchmark_group("NMS Radius Impact");
+    
+    let (width, height) = (512, 512);
+    let img = create_benchmark_image(width, height, "realistic");
+    
+    // Test different NMS radius values
+    for radius in [1.0, 2.0, 3.0, 5.0, 8.0] {
+        group.bench_function(&format!("radius_{:.1}", radius), |b| {
+            b.iter(|| {
+                let configured = DetectorBuilder::new(width, height)
+                    .threshold(20)
+                    .nms_radius(radius)
+                    .build()
+                    .unwrap();
+                configured.detect_keypoints(&img).unwrap()
+            })
+        });
+    }
+    
+    group.finish();
+}
+
+fn benchmark_enhanced_features(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Enhanced Features");
+    
+    let (width, height) = (512, 512);
+    let img = create_benchmark_image(width, height, "realistic");
+    
+    // Baseline - minimal features
+    group.bench_function("baseline", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(20)
+                .fast_variant(FastVariant::Fast9)
+                .harris_corners(false)
+                .adaptive_thresholding(false)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    // With Harris corners
+    group.bench_function("with_harris", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(20)
+                .fast_variant(FastVariant::Fast9)
+                .harris_corners(true)
+                .adaptive_thresholding(false)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    // With adaptive thresholding
+    group.bench_function("with_adaptive", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(20)
+                .fast_variant(FastVariant::Fast9)
+                .harris_corners(false)
+                .adaptive_thresholding(true)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    // With all enhanced features
+    group.bench_function("all_enhanced", |b| {
+        b.iter(|| {
+            let configured = DetectorBuilder::new(width, height)
+                .threshold(20)
+                .fast_variant(FastVariant::custom(10))
+                .harris_corners(true)
+                .adaptive_thresholding(true)
+                .subpixel_refinement(true)
+                .build()
+                .unwrap();
+            configured.detect_keypoints(&img).unwrap()
+        })
+    });
+    
+    group.finish();
+}
+
 #[cfg(feature = "clahe-preprocessing")]
 criterion_group!(
     benches,
@@ -609,7 +732,10 @@ criterion_group!(
     benchmark_detector_builder_presets,
     benchmark_detector_builder_api_overhead,
     benchmark_detector_builder_feature_flags,
-    benchmark_detector_builder_configuration_impact
+    benchmark_detector_builder_configuration_impact,
+    benchmark_fast_variants,
+    benchmark_nms_radius_impact,
+    benchmark_enhanced_features
 );
 
 #[cfg(not(feature = "clahe-preprocessing"))]
@@ -625,7 +751,10 @@ criterion_group!(
     benchmark_detector_builder_presets,
     benchmark_detector_builder_api_overhead,
     benchmark_detector_builder_feature_flags,
-    benchmark_detector_builder_configuration_impact
+    benchmark_detector_builder_configuration_impact,
+    benchmark_fast_variants,
+    benchmark_nms_radius_impact,
+    benchmark_enhanced_features
 );
 
 criterion_main!(benches); 

@@ -7,7 +7,7 @@ use crate::refinement::KeypointRefinement;
 use crate::preprocessing::ImagePreprocessing;
 use rayon::prelude::*;
 
-/// Main FAST corner detector with multi-scale capability
+#[derive(Debug, Clone)]
 pub struct FastDetector {
     cfg: OrbConfig,
     w: usize,
@@ -78,7 +78,8 @@ impl FastDetector {
     /// Detect keypoints with multi-scale detection
     pub fn detect_keypoints(&self, img: &Image) -> FastResult<Vec<Keypoint>> {
         let scored_keypoints = self.detect_keypoints_with_response(img)?;
-        let suppressed = KeypointRefinement::non_maximum_suppression(&scored_keypoints, 3.0);
+        // Use configurable NMS distance from OrbConfig
+        let suppressed = KeypointRefinement::non_maximum_suppression(&scored_keypoints, self.cfg.nms_radius);
         
         // Apply subpixel refinement to the filtered keypoints
         let refined_keypoints = suppressed
@@ -89,7 +90,7 @@ impl FastDetector {
         Ok(refined_keypoints)
     }
 
-    /// Detect keypoints across multiple scales with response scores
+    /// Detect keypoints with multi-scale detection and scale-aware NMS
     pub fn detect_keypoints_with_response(&self, img: &Image) -> FastResult<Vec<ScoredKeypoint>> {
         // Validate input
         self.validate_image(img)?;
@@ -97,14 +98,25 @@ impl FastDetector {
         // Build image pyramid
         let pyramid = ImagePyramid::build_image_pyramid(img, self.w, self.h, &self.scale_levels)?;
         
-        // Detect keypoints at each scale level
+        // Detect keypoints at each scale level with scale information
         let scale_keypoints: Vec<Vec<ScoredKeypoint>> = self.scale_levels.iter()
             .zip(pyramid.iter())
             .collect::<Vec<_>>()
             .into_par_iter()
             .map(|(scale_level, scaled_img)| {
                 match self.detect_keypoints_at_scale(scaled_img, scale_level) {
-                    Ok(keypoints) => keypoints,
+                    Ok(mut keypoints) => {
+                        // Apply per-scale NMS with scale-aware radius
+                        let scale_aware_radius = self.cfg.nms_radius / scale_level.scale;
+                        let suppressed = KeypointRefinement::non_maximum_suppression(&keypoints, scale_aware_radius);
+                        
+                        // Transform coordinates back to original scale
+                        suppressed.into_iter().map(|mut sk| {
+                            sk.keypoint.x *= scale_level.scale;
+                            sk.keypoint.y *= scale_level.scale;
+                            sk
+                        }).collect()
+                    },
                     Err(_) => Vec::new(), // Skip failed scales
                 }
             })
@@ -113,13 +125,10 @@ impl FastDetector {
         // Combine keypoints from all scales
         let mut all_keypoints: Vec<ScoredKeypoint> = scale_keypoints.into_iter().flatten().collect();
 
-        // Transform coordinates back to original scale
-        for _keypoint in all_keypoints.iter_mut() {
-            // Note: Scale information is stored in ScaleLevel, not Keypoint
-            // For now, coordinates are already in the correct scale
-        }
+        // Apply final global NMS to handle overlaps between scales
+        let global_suppressed = KeypointRefinement::non_maximum_suppression(&all_keypoints, self.cfg.nms_radius);
 
-        Ok(all_keypoints)
+        Ok(global_suppressed)
     }
 
     /// Detect keypoints at a specific scale level
@@ -127,22 +136,25 @@ impl FastDetector {
         // Compute adaptive thresholds for this scale
         let adaptive_thresholds = ImagePreprocessing::compute_adaptive_thresholds(
             img, 
-            scale_level.width, 
+            scale_level.width,  // Use scale level dimensions
             scale_level.height, 
             scale_level, 
             cfg!(feature = "rolling-window-stats")
         )?;
 
-        // Detect corners using FAST algorithm
+        // Detect corners using FAST algorithm with configurable variant and Harris scoring
         let use_optimized_layout = cfg!(feature = "optimized-memory-layout");
+        let use_harris = cfg!(feature = "harris-corners");
         let mut keypoints = CornerDetector::detect_keypoints_at_scale(
             img, 
             scale_level, 
             &adaptive_thresholds, 
-            use_optimized_layout
+            use_optimized_layout,
+            self.cfg.fast_variant,
+            use_harris
         )?;
 
-        // Compute orientations for detected keypoints
+        // Compute orientations for ALL detected keypoints (regardless of detection path)
         for keypoint in keypoints.iter_mut() {
             keypoint.keypoint.angle = KeypointRefinement::compute_orientation_at_scale(
                 img,

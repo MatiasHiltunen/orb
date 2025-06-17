@@ -1,12 +1,12 @@
 {
   "core": {
-    "threshold": 15,
-    "patch_size": 23,
+    "threshold": 8,
+    "patch_size": 31,
     "n_threads": 20,
     "fast_variant": {
-      "FastN": 10
+      "FastN": 14
     },
-    "nms_radius": 2.5
+    "nms_radius": 1.5
   },
   "width": 567,
   "height": 567,
@@ -14,10 +14,10 @@
   "enable_optimized_layout": true,
   "enable_harris_corners": true,
   "enable_adaptive_thresholding": true,
-  "enable_clahe_preprocessing": false,
-  "nms_distance": 2.5,
+  "enable_clahe_preprocessing": true,
+  "nms_distance": 1.5,
   "subpixel_refinement": true,
-  "name": "Research Quality",
-  "description": "Maximum feature detection quality",
+  "name": "Precision",
+  "description": "Maximum quality with Harris-FAST hybrid scoring and enhanced preprocessing",
   "version": "1.0"
 }

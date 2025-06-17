@@ -1,5 +1,5 @@
 use orb_core::{Image, Keypoint};
-use crate::error::{FastError, FastResult};
+use crate::error::FastResult;
 use crate::types::{ScoredKeypoint, ScaleLevel};
 
 /// Subpixel refinement and orientation computation

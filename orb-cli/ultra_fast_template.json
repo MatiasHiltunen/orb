@@ -17,7 +17,7 @@
   "enable_clahe_preprocessing": false,
   "nms_distance": 8.0,
   "subpixel_refinement": false,
-  "name": "Production Fast",
-  "description": "Optimized for real-time applications",
+  "name": "Ultra Fast",
+  "description": "Maximum speed with minimal processing - ideal for real-time applications",
   "version": "1.0"
 }

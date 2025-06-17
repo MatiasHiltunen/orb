@@ -1,6 +1,8 @@
 use orb_core::{Image, Keypoint, Descriptor};
 use rayon::prelude::*;
 
+const DESCRIPTOR_SIZE: usize = 32;
+
 pub struct BriefGenerator {
     w: usize,
     h: usize,
@@ -13,6 +15,8 @@ impl BriefGenerator {
     }
 
     pub fn generate_descriptors(&self, img: &Image, kps: &[Keypoint]) -> Vec<Descriptor> {
+        // TODO: This should be 256 pairs for a 32-byte descriptor for optimal performance.
+        // These pairs can be learned from a dataset (see the BRIEF paper).
         const PAIRS: [(i32, i32, i32, i32); 32] = [
             (-4, 0, 4, 0),
             (-3, -3, 3, 3),
@@ -52,7 +56,9 @@ impl BriefGenerator {
             .map(|kp| {
                 let (s, c) = kp.angle.sin_cos();
                 let (cx, cy) = (kp.x, kp.y);
-                let mut d = [0u8; 32];
+                let mut d = [0u8; DESCRIPTOR_SIZE];
+
+                // With only 32 pairs, this will only fill the first 4 bytes of the descriptor.
                 for (i, &(dx1, dy1, dx2, dy2)) in PAIRS.iter().enumerate() {
                     // Apply rotation and translation for subpixel coordinates
                     let (rx1, ry1) = (
@@ -69,7 +75,7 @@ impl BriefGenerator {
                     let val2 = self.bilinear_sample(img, rx2, ry2);
 
                     let bit = (val1 < val2) as u8;
-                    d[i >> 3] |= bit << (7 - (i & 7));
+                    d[i / 8] |= bit << (i % 8);
                 }
                 d
             })

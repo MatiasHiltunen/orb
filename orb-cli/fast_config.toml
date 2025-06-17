@@ -1,17 +1,21 @@
-width = 512
-height = 512
+width = 567
+height = 567
 enable_simd = true
 enable_optimized_layout = true
 enable_harris_corners = false
 enable_adaptive_thresholding = false
 enable_clahe_preprocessing = false
-nms_distance = 3.0
+nms_distance = 8.0
 subpixel_refinement = false
 name = "Production Fast"
 description = "Optimized for real-time applications"
-version = "1.0.0"
+version = "1.0"
 
 [core]
-threshold = 25
+threshold = 35
 patch_size = 15
-n_threads = 1
+n_threads = 20
+nms_radius = 8.0
+
+[core.fast_variant]
+FastN = 6

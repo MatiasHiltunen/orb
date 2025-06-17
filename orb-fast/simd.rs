@@ -1,13 +1,14 @@
 use orb_core::Image;
-use crate::error::{FastError, FastResult};
+use crate::error::FastResult;
 use crate::types::{CornerType, ScoredKeypoint, ScaleLevel};
+use crate::utils::has_consecutive_pixels;
 
 /// SIMD-optimized implementations for corner detection and feature computation
 pub struct SimdOperations;
 
 impl SimdOperations {
-    /// Fast corner check using SIMD optimizations
-    pub fn fast_corner_check_simd(
+    /// Fast corner check using SIMD optimizations with consecutive pixel requirement
+    fn fast_corner_check_simd(
         row_ptrs: &[*const u8],
         x: usize,
         y: usize,
@@ -15,15 +16,17 @@ impl SimdOperations {
         threshold: u8,
         offsets: &[(i32, i32); 16],
         width: usize,
+        min_consecutive: usize,
     ) -> (bool, CornerType) {
         let center_i32 = center_pixel as i32;
         let threshold_i32 = threshold as i32;
         
-        let mut brighter_count = 0u32;
-        let mut darker_count = 0u32;
+        // Create boolean arrays for bright and dark pixels
+        let mut is_brighter = [false; 16];
+        let mut is_darker = [false; 16];
         
         // Process pixels in groups for better cache utilization
-        for &(dx, dy) in offsets.iter() {
+        for (i, &(dx, dy)) in offsets.iter().enumerate() {
             let px = (x as i32 + dx) as usize;
             let py = (y as i32 + dy) as usize;
             
@@ -33,18 +36,21 @@ impl SimdOperations {
                     let pixel = *pixel_ptr as i32;
                     
                     if pixel > center_i32 + threshold_i32 {
-                        brighter_count += 1;
+                        is_brighter[i] = true;
                     } else if pixel < center_i32 - threshold_i32 {
-                        darker_count += 1;
+                        is_darker[i] = true;
                     }
                 }
             }
         }
         
-        // FAST corner requires 9+ consecutive pixels above/below threshold
-        if brighter_count >= 9 {
+        // Check for consecutive pixels using optimized utils
+        let has_bright_corner = has_consecutive_pixels(&is_brighter, min_consecutive);
+        let has_dark_corner = has_consecutive_pixels(&is_darker, min_consecutive);
+        
+        if has_bright_corner {
             (true, CornerType::Bright)
-        } else if darker_count >= 9 {
+        } else if has_dark_corner {
             (true, CornerType::Dark)
         } else {
             (false, CornerType::None)
@@ -60,6 +66,8 @@ impl SimdOperations {
         y: usize,
         x_start: usize,
         x_end: usize,
+        min_consecutive: usize,
+        use_harris: bool,
     ) -> Vec<ScoredKeypoint> {
         let mut keypoints = Vec::new();
         let width = scale_level.width;
@@ -75,11 +83,11 @@ impl SimdOperations {
                 let threshold = Self::get_local_threshold_cached(adaptive_thresholds, x, y, scale_level);
                 
                 let (is_corner, corner_type) = Self::fast_corner_check_simd(
-                    &row_ptrs, x, y, center_pixel, threshold, offsets, width
+                    &row_ptrs, x, y, center_pixel, threshold, offsets, width, min_consecutive
                 );
                 
                 if is_corner {
-                    let response = Self::compute_response_optimized(img, scale_level, x, y, corner_type);
+                    let response = Self::compute_response_enhanced(img, scale_level, x, y, corner_type, use_harris);
                     keypoints.push(ScoredKeypoint {
                         keypoint: orb_core::Keypoint {
                             x: x as f32,
@@ -100,7 +108,7 @@ impl SimdOperations {
         thresholds: &[Vec<u8>],
         x: usize,
         y: usize,
-        scale_level: &ScaleLevel,
+        _scale_level: &ScaleLevel,
     ) -> u8 {
         if thresholds.is_empty() {
             return 10; // Default threshold
@@ -110,13 +118,53 @@ impl SimdOperations {
         let block_x = x / block_size;
         let block_y = y / block_size;
         
-        let blocks_x = (scale_level.width + block_size - 1) / block_size;
-        
         if block_y < thresholds.len() && block_x < thresholds[block_y].len() {
             thresholds[block_y][block_x]
         } else {
             10 // Default fallback
         }
+    }
+
+    /// Compute enhanced response with optional Harris scoring
+    fn compute_response_enhanced(
+        img: &Image,
+        scale_level: &ScaleLevel,
+        x: usize,
+        y: usize,
+        corner_type: CornerType,
+        use_harris: bool,
+    ) -> f32 {
+        // Base FAST response
+        let fast_response = Self::compute_intensity_response_typed(img, scale_level, x, y, corner_type);
+
+        if !use_harris {
+            return fast_response;
+        }
+
+        // Harris corner response for additional quality measure
+        let harris_response = Self::compute_harris_response_simd(img, scale_level, x, y);
+
+        // Combine responses with weights
+        let alpha = 0.7; // Weight for FAST response
+        let beta = 0.3;  // Weight for Harris response
+
+        // Normalize Harris response to similar range as FAST
+        let normalized_harris = (harris_response / 1000.0).clamp(0.0, 100.0);
+        
+        alpha * fast_response + beta * normalized_harris
+    }
+
+    /// SIMD-optimized Harris corner response computation
+    fn compute_harris_response_simd(
+        img: &Image,
+        scale_level: &ScaleLevel,
+        x: usize,
+        y: usize,
+    ) -> f32 {
+        // For SIMD path, delegate to the main Harris implementation
+        // TODO: Implement true SIMD Harris response computation
+        use crate::corner_detection::CornerDetector;
+        CornerDetector::compute_harris_response(img, scale_level.width, scale_level.height, x, y)
     }
 
     /// Compute optimized response for detected corners

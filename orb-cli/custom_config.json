@@ -1,19 +1,21 @@
 {
   "core": {
     "threshold": 20,
-    "patch_size": 15,
-    "n_threads": 20
+    "patch_size": 31,
+    "n_threads": 1,
+    "fast_variant": "Fast9",
+    "nms_radius": 3.0
   },
-  "width": 512,
-  "height": 512,
+  "width": 567,
+  "height": 567,
   "enable_simd": true,
   "enable_optimized_layout": true,
   "enable_harris_corners": false,
   "enable_adaptive_thresholding": false,
   "enable_clahe_preprocessing": false,
-  "nms_distance": 5.0,
+  "nms_distance": 3.0,
   "subpixel_refinement": true,
   "name": "Custom Config",
   "description": "Balanced configuration for specific use case",
-  "version": "1.0.0"
+  "version": "1.0"
 }

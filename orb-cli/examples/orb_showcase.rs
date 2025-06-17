@@ -1,4 +1,4 @@
-use orb_fast::{DetectorBuilder, FastResult};
+use orb_fast::DetectorBuilder;
 #[cfg(feature = "serde")]
 use orb_fast::DetectorConfig;
 use orb_core::Image;
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let custom_detector = DetectorBuilder::new(width, height)
         .threshold(30)
         .patch_size(17)
-        .nms_distance(4.0)
+        .nms_radius(4.0)
         .harris_corners(true)
         .adaptive_thresholding(false)
         .clahe_preprocessing(false)
@@ -46,9 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("-----------------------------------");
     
     let presets = vec![
-        ("Fast", DetectorBuilder::new(width, height).preset_fast()),
-        ("Quality", DetectorBuilder::new(width, height).preset_quality()),
-        ("Illumination Robust", DetectorBuilder::new(width, height).preset_illumination_robust()),
+        ("Ultra Fast", DetectorBuilder::new(width, height).preset_ultra_fast()),
+        ("Balanced", DetectorBuilder::new(width, height).preset_balanced()),
+        ("Precision", DetectorBuilder::new(width, height).preset_precision()),
     ];
     
     let mut results = Vec::new();
@@ -173,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🎨 Showcase 6: Visualization");
     println!("----------------------------");
     
-    let quality_detector = DetectorBuilder::new(width, height).preset_quality().build()?;
+    let quality_detector = DetectorBuilder::new(width, height).preset_balanced().build()?;
     let keypoints = quality_detector.detect_keypoints(&orb_image)?;
     
     // Create visualization
